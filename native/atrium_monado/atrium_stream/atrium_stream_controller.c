@@ -160,6 +160,22 @@ controller_get_tracked_pose(struct xrt_device *xdev,
 	return XRT_SUCCESS;
 }
 
+// Vibration goes to the headset's controllers through the core.
+static xrt_result_t
+controller_set_output(struct xrt_device *xdev, enum xrt_output_name name, const struct xrt_output_value *value)
+{
+	struct atrium_stream_controller *c = (struct atrium_stream_controller *)xdev;
+	if (name != XRT_OUTPUT_NAME_TOUCH_HAPTIC || value->type != XRT_OUTPUT_VALUE_TYPE_VIBRATION) {
+		return XRT_SUCCESS;
+	}
+	const struct xrt_output_value_vibration *v = &value->vibration;
+	// OpenXR's "minimum duration" is -1 and "unspecified frequency" is 0: give both a sane value.
+	float seconds = v->duration_ns > 0 ? (float)v->duration_ns / 1e9f : 0.05f;
+	float frequency = v->frequency > 0 ? v->frequency : 160.0f;
+	alvr_send_haptics(g_atrium_stream.hand_id[c->hand], seconds, frequency, v->amplitude);
+	return XRT_SUCCESS;
+}
+
 static void
 controller_destroy(struct xrt_device *xdev)
 {
@@ -181,11 +197,12 @@ atrium_stream_controller_create(int hand)
 	    U_DEVICE_ALLOCATE(struct atrium_stream_controller, U_DEVICE_ALLOC_TRACKING_NONE, input_count, 1);
 	c->hand = hand;
 
+	// Safe "not implemented" defaults for everything optional; then ours.
+	u_device_populate_function_pointers(&c->base, controller_get_tracked_pose, controller_destroy);
 	c->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
 	c->base.device_type = hand == 0 ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
 	c->base.update_inputs = controller_update_inputs;
-	c->base.get_tracked_pose = controller_get_tracked_pose;
-	c->base.destroy = controller_destroy;
+	c->base.set_output = controller_set_output;
 	c->base.supported.orientation_tracking = true;
 	c->base.supported.position_tracking = true;
 	snprintf(c->base.str, XRT_DEVICE_NAME_LEN, "Atrium streamed %s controller", hand == 0 ? "left" : "right");

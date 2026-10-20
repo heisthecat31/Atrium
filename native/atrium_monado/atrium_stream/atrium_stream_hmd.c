@@ -94,11 +94,10 @@ atrium_stream_hmd_create(void)
 	enum u_device_alloc_flags flags = U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE;
 	struct atrium_stream_hmd *hmd = U_DEVICE_ALLOCATE(struct atrium_stream_hmd, flags, 1, 0);
 
-	hmd->base.update_inputs = u_device_noop_update_inputs;
-	hmd->base.get_tracked_pose = hmd_get_tracked_pose;
+	// Safe "not implemented" defaults for everything optional; then ours.
+	u_device_populate_function_pointers(&hmd->base, hmd_get_tracked_pose, hmd_destroy);
 	hmd->base.get_view_poses = hmd_get_view_poses;
 	hmd->base.get_visibility_mask = hmd_get_visibility_mask;
-	hmd->base.destroy = hmd_destroy;
 	hmd->base.name = XRT_DEVICE_GENERIC_HMD;
 	hmd->base.device_type = XRT_DEVICE_TYPE_HMD;
 	hmd->base.supported.orientation_tracking = true;

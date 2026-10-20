@@ -525,6 +525,37 @@ target_info_gpu(struct comp_target *ct, int64_t frame_id, int64_t gpu_start_ns, 
 	u_pc_info_gpu(ast(ct)->upc, frame_id, gpu_start_ns, gpu_end_ns, when_ns);
 }
 
+// Monado calls these without checking for NULL (e.g. xrEnumerateDisplayRefreshRatesFB), so they
+// must exist. The stream runs at one rate, the one the compositor was set up with.
+static float
+stream_hz(struct comp_target *ct)
+{
+	int64_t interval = ct->c->settings.nominal_frame_interval_ns;
+	return interval > 0 ? (float)U_TIME_1S_IN_NS / (float)interval : 72.0f;
+}
+
+static xrt_result_t
+target_get_refresh_rates(struct comp_target *ct, uint32_t *count, float *rates)
+{
+	*count = 1;
+	rates[0] = stream_hz(ct);
+	return XRT_SUCCESS;
+}
+
+static xrt_result_t
+target_get_current_refresh_rate(struct comp_target *ct, float *out_display_refresh_rate_hz)
+{
+	*out_display_refresh_rate_hz = stream_hz(ct);
+	return XRT_SUCCESS;
+}
+
+static xrt_result_t
+target_request_refresh_rate(struct comp_target *ct, float display_refresh_rate_hz)
+{
+	(void)display_refresh_rate_hz; // the headset sets the rate; requests are accepted as-is
+	return XRT_SUCCESS;
+}
+
 static VkResult
 target_queue_supports_present(struct comp_target *ct, struct vk_bundle_queue *queue, VkBool32 *out_supported)
 {
@@ -612,6 +643,9 @@ target_create(struct comp_compositor *c)
 	t->base.update_timings = target_update_timings;
 	t->base.info_gpu = target_info_gpu;
 	t->base.set_title = target_set_title;
+	t->base.get_refresh_rates = target_get_refresh_rates;
+	t->base.get_current_refresh_rate = target_get_current_refresh_rate;
+	t->base.request_refresh_rate = target_request_refresh_rate;
 	t->base.queue_supports_present = target_queue_supports_present;
 	t->base.is_shared_presentable_image = target_is_shared_presentable_image;
 	t->base.destroy = target_destroy;
