@@ -109,6 +109,12 @@ impl App {
             let hw = headsets::detect();
             let st = rt::state(&hw);
             rt::write_backend(&st);
+            // A Rift on Meta's backend: OVRServer runs inside Atrium for as long as Atrium does.
+            if st.chosen.as_ref().is_some_and(|b| b.id == "meta") && meta_runtime::installed() && !meta_runtime::running() {
+                if let Err(e) = meta_runtime::start() {
+                    sys::log(&e);
+                }
+            }
             {
                 let mut s = app.st();
                 s.hw = Some(hw);

@@ -138,7 +138,7 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   - **Decision (user):** no hardware adapters (not every user can buy one). For Rift on
     Windows + NVIDIA, Atrium runs Meta's runtime **barebones** as its display backend:
     `src/services/meta_runtime.rs`. Only OVRServer_x64 is kept: it runs as the user without Meta's
-    service (OVR Service Launcher + OVR Redir, both SYSTEM), so Atrium starts it directly. Dash off via
+    service (OVR Service Launcher + OVR Redir, both SYSTEM), so Atrium starts it directly: as its own child, no console window (it's a console app; run by hand it shows as a separate Task Manager app), in a kill-on-close job so it ends with Atrium (`meta_runtime::start()`, from the hardware loop whenever the Meta backend is chosen). Dash off via
     Meta's own `HKLM\SOFTWARE\Wow6432Node\Oculus VR, LLC\Oculus\Config\PreventDashLaunch=1`
     (one UAC step, once per PC, in `prepare()` on the first Rift-game launch). Client.exe (Meta
     Horizon Link app, relaunched by OVRServer whenever a game connects) and
