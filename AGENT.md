@@ -120,6 +120,16 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     its VRWorks Direct Mode API, which isn't in the public NVAPI (github NVIDIA/nvapi). Meta's
     log shows it uses that path (NVDirectDisplay). `native/src/riftdisplay.cpp` lists WinRT
     display targets.
+  - `native/src/nvdisplays.cpp` (public NVAPI, github NVIDIA/nvapi; headers/lib not committed):
+    the Rift IS physically connected: display id 0x80061080, DisplayPort (via the user's
+    DP->HDMI adapter), EDID maker OVR product 0x0004, but filtered out of
+    GetConnectedDisplayIds. Public "dedicated display" API (R495+) exists
+    (NvAPI_DISP_AcquireDedicatedDisplay -> Windows DisplaySource, then
+    Windows.Devices.Display.Core), but Acquire on the Rift returns NVAPI_UNREGISTERED_RESOURCE
+    and making a display dedicated needs NVIDIA's configureDdisplay, which only supports
+    RTX Pro/Quadro on Windows 11 Pro/Enterprise. Not GeForce + Win10 Home (this PC).
+    Remaining routes: hardware EDID adapter, Linux (VK_KHR_display lists hidden HMDs),
+    NVIDIA VRWorks licence. Don't use private/undocumented NVAPI entry points.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic
