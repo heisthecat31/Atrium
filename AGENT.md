@@ -60,7 +60,7 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   no encoder yet (expected).
   - Open: pairing/trust UI in the Atrium app (not hand-edited session.json); ALVR core tries to
     "restart SteamVR" after a settings change and the first handshake fails (patch it out);
-    controller poses read 0 in a headless test (check once frames flow); ALVR's web API listens
+    controller poses read 0 in that test because the controllers were off (user), not a bug; ALVR's web API listens
     on 0.0.0.0:8082 (restrict); Windows firewall rule for atrium-service (UDP 9943/9944).
   - Next: the video path: a Monado compositor target that hardware-encodes each frame (Vulkan
     Video / NVENC) and calls alvr_set_video_config_nals + alvr_send_video_nal.
