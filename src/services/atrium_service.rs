@@ -1,4 +1,4 @@
-//! The Atrium Runtime's headset service on Linux (native/atrium_xr_linux: Atrium's build of
+//! The Atrium Runtime's headset service on Linux (native/atrium_monado: Atrium's build of
 //! Monado). It owns the headset: drivers, tracking and the compositor that takes the headset's
 //! display directly. Games load libopenxr_atrium.so, which talks to it over a socket
 //! ($XDG_RUNTIME_DIR/atrium_comp_ipc). Atrium runs it as a child while a headset is connected;
@@ -44,7 +44,7 @@ pub fn start() -> Result<(), String> {
         if running() {
             return Ok(());
         }
-        let exe = sys::native_tool("atrium-service").ok_or("The Atrium Runtime isn't built (native/atrium_xr_linux/build.sh)")?;
+        let exe = sys::native_tool("atrium-service").ok_or("The Atrium Runtime isn't built (native/atrium_monado/build.sh)")?;
         let log = std::fs::File::create(sys::data_dir().join("service.log")).map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new(&exe);
         // stdin must be a pipe: the service watches it for console commands and won't start on

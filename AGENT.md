@@ -37,8 +37,8 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `src/login.rs` | sign-in: Steam via system browser + localhost OpenID return; Meta in a native webview (wry) subprocess (`atrium --login-meta`) that catches the `oculus://` callback |
 | `runtime/` (top level, gitignored) | Meta DLLs copied earlier for research. Locked by OVRServer; never commit |
 | `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI): forwards to the backend in `runtime.json`; trace with `ATRIUM_XR_TRACE=1` -> `logs\xr.log` |
-| `native/atrium_client/` | Atrium's headset app (Quest/Pico): Atrium's build of ALVR's client, `build.ps1` -> `native\outtrium-client.apk`. App side: `src/services/standalone.rs` (adb) |
-| `native/atrium_xr_linux/` | the Atrium Runtime on Linux: Atrium's build of Monado (pinned + `patches/`), `build.sh` -> `native/out/linux/` (`libopenxr_atrium.so`, `atrium-service`, `atrium_openxr.json`). App side: `src/services/atrium_service.rs` |
+| `native/atrium_client/` | Atrium's headset app (Quest/Pico): Atrium's build of ALVR's client, `build.ps1` -> `native\out\atrium-client.apk`. App side: `src/services/standalone.rs` (adb) |
+| `native/atrium_monado/` | the Atrium Runtime on Linux: Atrium's build of Monado (pinned + `patches/`), `build.sh` -> `native/out/linux/` (`libopenxr_atrium.so`, `atrium-service`, `atrium_openxr.json`). App side: `src/services/atrium_service.rs` |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
 | `native/atrium_ovr/` | Atrium OVR: CMake fetches pinned Revive/OpenXR SDK/Oculus SDK/Detours, builds `LibOVRRT64_1.dll` (static CRT + static OpenXR loader, one DLL). Log: `%APPDATA%\Atrium\logs\ovr.log` |
@@ -50,6 +50,21 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (16:30): **Atrium Runtime for Windows** (streaming, step 1). `native/atrium_xr_linux`
+  renamed `native/atrium_monado`: one pinned Monado + patches, `build.sh` (Linux) and `build.ps1`
+  (Windows -> `native\out\monado\`: openxr_atrium.dll, atrium-service.exe, atrium_openxr.json,
+  cjson.dll, pthreadVCE3.dll). Out-of-process service, socket `atrium_comp_ipc`, no vcpkg default
+  features (no SDL GUI, no USB). Tested: service with the simulated HMD + a Khronos-loader app ->
+  same results as Linux (runtime "Atrium", OVRPlugin quirk works). Runs on the system Vulkan
+  loader (vcpkg's vulkan-1.dll isn't staged).
+  - Traps: vcpkg shallow clone lacks Monado's `builtin-baseline` commit (4334d8b4) -> fetch it by
+    SHA. VS 2026's bundled vcpkg has no ports catalogue: use a real vcpkg checkout (2026.07.29).
+    MSVC needs `/Zc:__cplusplus` or Monado's u_file.cpp falls back to <experimental/filesystem>
+    (removed). PowerShell/Python string literals with `\a`, `\b`... in Windows paths mangled two
+    docs; use raw strings.
+  - Next (step 2): Atrium streaming driver in Monado: a target builder + HMD/controller devices
+    fed by ALVR server_core's C API, and a compositor target that hardware-encodes each frame and
+    sends NALs. Then the app runs atrium-service on Windows for a connected Quest.
 - 2026-10-20 (16:00): **Atrium streaming, step 1: the headset app** (`native/atrium_client`). User
   decisions: headset app = Atrium's build of ALVR's client (MIT; not from scratch, not WiVRn: GPL);
   PC side = the Monado-based Atrium Runtime on Windows too, with an Atrium streaming driver;
@@ -81,7 +96,7 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   Tested: Windows on Meta's backend (name "Oculus", time conversion available; ordinary apps keep
   "Atrium (Oculus OpenXR)"); Linux headless session (time 0 ok for OVRPlugin, TIME_INVALID for
   others). Not yet tested with a real OVRPlugin game.
-- 2026-10-20 (15:00-15:30): **Atrium Runtime for Linux** (`native/atrium_xr_linux`). User chose
+- 2026-10-20 (15:00-15:30): **Atrium Runtime for Linux** (`native/atrium_monado`). User chose
   "built on Monado" (not from scratch, not a user-installed Monado) and build-only for now (no
   Linux boot on the test PC; WSL2 can't drive the headset display).
   - Monado main (pinned 5bca1effb, 2026-10-20) already has the CV1 end to end: `rift` (HMD,

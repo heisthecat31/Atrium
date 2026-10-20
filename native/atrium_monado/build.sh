@@ -12,7 +12,7 @@
 #   atrium-service        the headset service (compositor + drivers); the Atrium app runs it
 #   atrium_openxr.json    the runtime manifest
 #
-# Usage: native/atrium_xr_linux/build.sh [build-dir]   (default: ~/.cache/atrium-build)
+# Usage: native/atrium_monado/build.sh [build-dir]   (default: ~/.cache/atrium-build)
 # Build deps (Ubuntu/Debian): see README in this folder.
 set -euo pipefail
 
