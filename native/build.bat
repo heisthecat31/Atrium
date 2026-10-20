@@ -44,6 +44,10 @@ rem riftprobe: Atrium's own Rift CV1 access over HID (no Meta software): config 
 cl.exe /nologo /MT /O2 /EHsc /W3 /Foobj\ /Fe"out\riftprobe.exe" src\riftprobe.cpp
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+rem riftdisplay: the headset ("specialized") displays Windows can hand to a VR runtime (WinRT)
+cl.exe /nologo /MT /O2 /EHsc /std:c++20 /W3 /Foobj\ /Fe"out\riftdisplay.exe" src\riftdisplay.cpp
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
 rem SteamFrameSim.exe: the simulated headset, driving Meta's emulator through OculusDebugToolCLI
 rem (src\unsigned_plugin is the dropped plugin route: OVRServer only loads Meta-signed plugins)
 cl.exe /nologo /MT /O2 /EHsc /W3 /Foobj\ /Fe"out\SteamFrameSim.exe" src\steamframe_sim.cpp user32.lib gdi32.lib dwmapi.lib /link /SUBSYSTEM:WINDOWS

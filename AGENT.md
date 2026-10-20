@@ -106,6 +106,20 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   - Open: games Steam starts can only reach the Atrium Runtime if it's registered system-wide
     (Runtime page button, UAC); Atrium Runtime is Windows-only so far; no-Meta-installed case for
     signed-shim games; LibOVRPlatform stand-in.
+- 2026-10-20 (12:30-12:50): **Atrium's own Rift CV1 access** (`native/src/riftprobe.cpp`,
+  packet formats after OpenHMD, BSL-1.0). Goal is no Meta, no SteamVR (user, repeatedly).
+  - Read-only (Meta running): config reports (2160x1200 panel, ±4 g / ±2000 °/s), 1 kHz IMU,
+    gyro+accel orientation; `touch`: both Touch controllers via the radio (MI_01): buttons in
+    the low 4 bits, trigger/grip/stick raw (need per-controller calibration over the radio).
+  - Driving it (OVRService stopped, with the user's OK): enable display/audio/LEDs (0x1d),
+    keep-alive (0x08, 10 s), sensor config packet interval 1 (headset default 19 = 100 Hz)
+    -> 998 samples/s with no Meta software at all.
+  - **Display blocker:** on NVIDIA (RTX 5060, driver 610.88) the Rift panel never reaches
+    Windows (no OVR monitor device ever; WinRT DisplayManager sees only the 2 desktop monitors)
+    and Vulkan has no VK_KHR_display / VK_NV_acquire_winrt_display. NVIDIA keeps known HMDs for
+    its VRWorks Direct Mode API, which isn't in the public NVAPI (github NVIDIA/nvapi). Meta's
+    log shows it uses that path (NVDirectDisplay). `native/src/riftdisplay.cpp` lists WinRT
+    display targets.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic

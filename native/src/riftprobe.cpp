@@ -5,8 +5,12 @@
 // the headset awake) without changing anything. Packet formats follow OpenHMD's Rift driver
 // (Boost Software License 1.0, github.com/OpenHMD/OpenHMD, src/drv_oculus_rift).
 //
-//   riftprobe          info + 10 s of orientation
+//   riftprobe          info + 10 s of orientation (read-only)
 //   riftprobe info     configuration reports only
+//   riftprobe touch    Touch controllers through the radio (read-only)
+//   riftprobe drive    Atrium drives the headset itself: display/audio/LEDs on, keep-alive,
+//                      15 s of orientation, then the displays Windows sees. Only with Meta's
+//                      service stopped: two programs keeping the headset alive would fight.
 #include <windows.h>
 #include <setupapi.h>
 #include <hidsdi.h>
@@ -19,6 +23,7 @@
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "hid.lib")
+#pragma comment(lib, "user32.lib")
 
 static const wchar_t* kCv1Sensor = L"vid_2833&pid_0031&mi_00";
 
@@ -78,6 +83,26 @@ static int GetFeature(Hid& d, uint8_t id, std::vector<uint8_t>& buf)
 	buf[0] = id;
 	if (!HidD_GetFeature(d.h, buf.data(), (ULONG)buf.size())) return -1;
 	return (int)buf.size();
+}
+
+static bool SetFeature(Hid& d, const uint8_t* data, size_t len)
+{
+	std::vector<uint8_t> buf(d.featLen > len ? d.featLen : len, 0);
+	memcpy(buf.data(), data, len);
+	return HidD_SetFeature(d.h, buf.data(), (ULONG)buf.size()) != FALSE;
+}
+
+// The displays Windows knows about, active or not (the Rift's panel shows up as a monitor
+// on the GPU's HDMI output once the headset powers it).
+static void ListDisplays()
+{
+	DISPLAY_DEVICEW adapter = { sizeof(adapter) };
+	for (DWORD a = 0; EnumDisplayDevicesW(nullptr, a, &adapter, 0); a++) {
+		DISPLAY_DEVICEW mon = { sizeof(mon) };
+		for (DWORD m = 0; EnumDisplayDevicesW(adapter.DeviceName, m, &mon, 0); m++)
+			printf("  %ls -> %ls  [%ls]%s\n", adapter.DeviceName, mon.DeviceString, mon.DeviceID,
+				(mon.StateFlags & DISPLAY_DEVICE_ACTIVE) ? " active" : "");
+	}
 }
 
 static uint16_t U16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -231,6 +256,18 @@ int main(int argc, char** argv)
 			U16(&f[4]), U16(&f[6]), Fixed(&f[8]), Fixed(&f[12]), Fixed(&f[20]), Fixed(&f[24]), Fixed(&f[28]));
 	if (argc > 1 && !strcmp(argv[1], "info")) return 0;
 
+	const bool drive = argc > 1 && !strcmp(argv[1], "drive");
+	const uint8_t keepAlive[] = { 0x08, 0, 0, 0x10, 0x27 };   // keep alive for 10000 ms
+	if (drive) {
+		const uint8_t enable[] = { 0x1d, 0, 0, 1 | 2 | 4 };   // display | audio | LEDs
+		printf("Enable display/audio/LEDs: %s\n", SetFeature(d, enable, sizeof enable) ? "ok" : "FAILED");
+		printf("Keep-alive: %s\n", SetFeature(d, keepAlive, sizeof keepAlive) ? "ok" : "FAILED");
+		// Sensor config: same flags, packet interval 1 = full rate (the headset defaults to 19,
+		// about 100 samples/s; Meta's service sets 1), keep-alive 10000 ms.
+		const uint8_t config[] = { 0x02, 0, 0, 0x20, 1, 0x10, 0x27 };
+		printf("Sensor config (full rate): %s\n", SetFeature(d, config, sizeof config) ? "ok" : "FAILED");
+	}
+
 	// IMU stream: report 11, 64 bytes; up to 2 samples per report, timestamps in microseconds.
 	Fusion fusion;
 	std::vector<uint8_t> in(d.inLen ? d.inLen : 64);
@@ -239,8 +276,14 @@ int main(int argc, char** argv)
 	int reports = 0, samples = 0;
 	double accel[3] = {}, gyro[3] = {};
 	int16_t temp = 0;
-	printf("Reading the IMU for 10 s (read-only). Move the headset.\n");
-	while (GetTickCount64() - start < 10000) {
+	const ULONGLONG duration = drive ? 15000 : 10000;
+	ULONGLONG lastKeepAlive = start;
+	printf("Reading the IMU for %llu s%s. Move the headset.\n", duration / 1000, drive ? "" : " (read-only)");
+	while (GetTickCount64() - start < duration) {
+		if (drive && GetTickCount64() - lastKeepAlive > 8000) {
+			SetFeature(d, keepAlive, sizeof keepAlive);
+			lastKeepAlive = GetTickCount64();
+		}
 		DWORD got = 0;
 		if (!ReadFile(d.h, in.data(), (DWORD)in.size(), &got, nullptr)) {
 			printf("read failed (error %lu)\n", GetLastError());
@@ -274,6 +317,10 @@ int main(int argc, char** argv)
 	}
 	double secs = (GetTickCount64() - start) / 1000.0;
 	printf("%d reports, %d samples in %.1f s (%.0f samples/s)\n", reports, samples, secs, samples / secs);
+	if (drive) {
+		printf("Displays Windows sees now:\n");
+		ListDisplays();
+	}
 	CloseHandle(d.h);
 	return 0;
 }
