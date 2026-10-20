@@ -108,9 +108,21 @@ impl App {
     }
 
     fn watch_hardware(self: &Arc<Self>) {
-        self.spawn(|app| loop {
+        let mut last_wired: Option<std::time::Instant> = None;
+        self.spawn(move |app| loop {
             let hw = headsets::detect();
-            let st = rt::state(&hw);
+            let mut st = rt::state(&hw);
+            // A wired Rift drops off USB for a moment whenever OVRServer powers it up; don't let
+            // one missed pass hand the next game to another backend (Virtual Desktop's service
+            // always runs, so it would win).
+            if meta_runtime::needed(&hw) {
+                last_wired = Some(std::time::Instant::now());
+            } else if last_wired.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+                if let Some(meta) = st.backends.iter().find(|b| b.id == "meta").cloned() {
+                    st.chosen = Some(meta);
+                    st.reason = "Meta headset connected".into();
+                }
+            }
             rt::write_backend(&st);
             // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does.
             if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {

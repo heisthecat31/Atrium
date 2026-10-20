@@ -146,6 +146,25 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     CV1 + both Touch). RemoteDesktopCompanion is left alone: OVRServer restarts it within ~1 s
     of every exit (`onCoreTrackerExit::launchRemoteDesktop`). Open: games that check Meta
     entitlements need the platform runtime until Atrium's LibOVRPlatform stand-in exists.
+    - Started by Atrium (not the service), OVRServer doesn't launch Client.exe at all; Echo VR
+      runs fine with Client + platform runtime closed.
+    - Only a **wired Rift** (CV1 / Rift S on USB, `meta_runtime::needed`) starts OVRServer.
+      Quest isn't covered (user: only wired headsets get OVRServer).
+    - A launch waits until ovrprobe reports `hmdPresent`, then re-detects and picks the backend
+      again. **Trap:** OVRServer powers the Rift up and it drops off USB for a moment; a hardware
+      pass in that gap picked Virtual Desktop (its service always runs, so `streaming` is true)
+      and Echo failed with "Failed to initialize Oculus VR session". The hardware loop also keeps
+      Meta chosen for 30 s after the Rift was last seen. One launch at a time; a running game's
+      exe isn't started twice (repeat clicks while waiting had started Echo 9 times).
+    - Settings page: "Start Atrium when I sign in" (HKCU Run value `Atrium`; XDG autostart on
+      Linux), `src/sys/autostart.rs`.
+    - Declined: renaming/re-iconing OVRServer as "Atrium-OVR_Server". That means editing Meta's
+      binary and presenting it as Atrium's (licence, breaks its signature, updates undo it).
+    - OVRServer itself: one 9 MB exe, but it needs most of `Support\oculus-runtime` (386 MB:
+      OculusAppFramework.dll, d3dcompiler_47, server-plugins\Rift.dll / RiftS.dll, the OpenXR
+      runtime LibOVRRTImpl64_1.dll + oculus_openxr_64.json) and Meta's drivers (Oculus VR
+      Headset USB, Rift Sensor, Oculus Virtual Audio). Atrium can't ship or fetch these (no Meta
+      binaries); users without Meta installed need Meta's installer until Atrium's own driver.
     Remaining routes: hardware EDID adapter, Linux (VK_KHR_display lists hidden HMDs),
     NVIDIA VRWorks licence. Don't use private/undocumented NVAPI entry points.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
