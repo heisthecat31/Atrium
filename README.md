@@ -2,7 +2,8 @@
 
 One open-source home for every VR headset and every VR game.
 
-- **One app.** A native Rust + egui launcher for Windows and Linux. No Electron, no web UI.
+- **One app.** A Rust launcher for Windows and Linux. The UI is HTML/CSS in the webview the OS
+  already has (WebView2 / WebKitGTK); no Electron, no bundled browser.
 - **One runtime.** The Atrium Runtime is an OpenXR runtime and the only one Atrium exposes.
   Under the hood it forwards to the vendor stack that drives the connected headset (Meta, SteamVR,
   Monado/WiVRn), then replaces those with Atrium's own drivers headset by headset.
@@ -12,14 +13,15 @@ One open-source home for every VR headset and every VR game.
 - **One dashboard.** An in-VR dashboard (Unity, in [`Dashboard/`](Dashboard/)) shared by every
   headset.
 
-Status: early. Headset detection, Steam/Meta libraries and Steam/Meta sign-in work; the UI,
-launcher and runtime are in progress.
+Status: early. The app runs: headset detection, a merged Steam/Meta/local library, launching, and
+Steam/Meta sign-in. The Atrium Runtime itself is in progress.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `src/` | the Atrium app (Rust, egui/eframe) |
+| `src/` | the Atrium app (Rust; window + webview in `ui.rs`, state in `app.rs`) |
+| `web/` | the UI page (HTML/CSS/JS, compiled into the exe) |
 | `src/sys/` | platform access: registry, processes, VDF, settings, sealed secrets |
 | `src/services/` | headsets, runtime, Steam, Meta, library |
 | `src/login.rs` | Steam (OpenID) and Meta (native SSO) sign-in |
@@ -44,7 +46,7 @@ native\build.bat
 `native/third_party/LibOVR` is Meta's Oculus PC SDK (`Include/` and `Shim/`). It isn't in this
 repo for licence reasons; download the Oculus PC SDK from Meta and copy those two folders there.
 
-Until the UI lands, sign-ins can be run from a terminal:
+Sign-ins can also be run from a terminal (debugging):
 
 ```
 atrium --sign-in steam

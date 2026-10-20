@@ -207,7 +207,7 @@ fn is_meta_callback(url: &str) -> bool {
     l.starts_with("oculus://") || l.starts_with("oculus-client://")
 }
 
-fn window_icon() -> Option<tao::window::Icon> {
+pub fn window_icon() -> Option<tao::window::Icon> {
     let img = image::load_from_memory(include_bytes!("../assets/atrium.png")).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     tao::window::Icon::from_rgba(img.into_raw(), w, h).ok()

@@ -16,7 +16,7 @@ pub struct Backend {
     pub manifest: PathBuf,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct RuntimeState {
     /// atrium_openxr.json, if the runtime is built/installed
     pub manifest: Option<PathBuf>,

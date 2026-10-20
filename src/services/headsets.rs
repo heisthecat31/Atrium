@@ -1,9 +1,9 @@
 //! What VR hardware is here and how it reaches the PC: USB ids (no VR software needed), what
 //! Meta's runtime reports (ovrprobe), SteamVR, streaming apps, and the simulated Steam Frame.
 use crate::sys;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Headset {
     pub name: String,
     /// picks the line-art icon: rift, rifts, quest, index, vive, frame, wmr, pimax, beyond, generic
@@ -16,20 +16,20 @@ pub struct Headset {
     pub is_virtual: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Accessory {
     pub name: &'static str,
     pub count: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Streamer {
     pub id: &'static str,
     pub name: &'static str,
     pub running: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaHmd {
     #[serde(default)]
@@ -50,7 +50,7 @@ pub struct MetaHmd {
     pub refresh: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Hardware {
     pub headsets: Vec<Headset>,
     pub controllers: Vec<(String, String)>, // (name, via)

@@ -1,13 +1,16 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod app;
 mod login;
 mod services;
 mod sys;
+mod ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         // Meta sign-in window (child process, see login.rs).
         Some("--login-meta") => login::meta_window(),
-        // Until the UI exists: run a sign-in from the terminal and save it.
+        // Run a sign-in from a terminal and save it (debugging without the UI).
         Some("--sign-in") => {
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let mut s = sys::settings::Settings::load();
@@ -37,6 +40,6 @@ fn main() {
                 _ => eprintln!("usage: atrium --sign-in steam|meta"),
             }
         }
-        _ => eprintln!("Atrium UI not built yet. Try: atrium --sign-in steam|meta"),
+        _ => ui::run(),
     }
 }

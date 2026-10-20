@@ -6,7 +6,9 @@ Notes for any agent (or person) picking up this project. Read this first.
 
 **Atrium** is one open-source home for every VR headset and every VR game:
 
-- **One native app** (Rust + egui, our own UI design, no Electron, no web UI) for Windows and Linux.
+- **One native app** for Windows and Linux: Rust, with the UI in HTML/CSS shown by the system
+  webview (wry: WebView2 / WebKitGTK). Looks like the Electron prototype, ships no browser engine.
+  Not Electron, not egui (an egui version was tried 2026-10-20; the user preferred the web look).
 - **One runtime: the Atrium Runtime.** It's an OpenXR runtime (`atrium_openxr.json` +
   `atrium_xr.dll` / `libatrium_xr.so`) and the *only* runtime Atrium exposes. The Atrium app
   registers it as the system OpenXR runtime. Users never pick SteamVR / Meta / Virtual Desktop.
@@ -27,14 +29,16 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `Cargo.toml`, `src/` | the Atrium app (Rust, egui/eframe) |
 | `src/sys/` | platform access: registry, processes, USB, VDF, settings, secrets (DPAPI) |
 | `src/services/` | headsets, runtime, steam, meta, library, launcher |
-| `src/ui/` | theme, widgets, pages. All drawing is ours (`ui/theme.rs` holds the palette) |
+| `src/app.rs` | app state + commands from the page; pushes a full JSON snapshot (`atrium.update`) after every change |
+| `src/ui.rs` | tao window + wry webview; serves `web/` (compiled in) on the `atrium` protocol (`http://atrium.localhost/` on Windows), Meta store art at `/art?p=` (StoreAssets only) |
+| `web/` | the page: `index.html`, `app.css` (palette in `:root`), `app.js` (renders from the snapshot, `ipc.postMessage` for actions), `icons.js` (our line art) |
 | `src/login.rs` | sign-in: Steam via system browser + localhost OpenID return; Meta in a native webview (wry) subprocess (`atrium --login-meta`) that catches the `oculus://` callback |
 | `runtime/` (top level, gitignored) | Meta DLLs copied earlier for research. Locked by OVRServer; never commit |
 | `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI) |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
 | `native/third_party/LibOVR` | Meta Oculus SDK headers/shim: gitignored (not MIT) |
-| `assets/` | Atrium icon; `icons-reference.js` holds the headset line-art SVGs |
+| `assets/` | Atrium icon |
 
 Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamFrameSim, runtime).
 
@@ -47,7 +51,11 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   OpenID in system browser → `127.0.0.1:<random>/steam?state=<nonce>`, verified with
   `check_authentication`. `services/library.rs` holds only the `Game`/`Art`/`Source` types so far.
   Until the UI exists, `atrium --sign-in steam|meta` runs a sign-in from a terminal and saves it.
-  Next: library merge, launcher, egui UI.
+  Then: `services/library.rs` (merge installed + owned, caches), `services/launcher.rs` (Steam via
+  `steam://`, Meta/local direct or through RiftLiftLauncher), and the webview UI.
+  Open: art for owned-but-not-installed Meta games (graph.oculus.com has `cover_square_image`
+  fields but they came back empty; store pages render images client-side). The Steam sign-in
+  printed success but its save didn't land once; `Settings::save` now logs failures.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic
