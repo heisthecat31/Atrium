@@ -47,7 +47,7 @@ document.addEventListener('error', (e) => {
 }, true);
 
 // ---- sidebar ------------------------------------------------------------------------------
-const PAGES = [['library', 'Library', icon.library], ['devices', 'Devices', icon.devices], ['runtime', 'Runtime', icon.runtimes], ['accounts', 'Accounts', icon.accounts]];
+const PAGES = [['library', 'Library', icon.library], ['devices', 'Devices', icon.devices], ['runtime', 'Runtime', icon.runtimes], ['accounts', 'Accounts', icon.accounts], ['settings', 'Settings', icon.settings]];
 
 function primary() {
   const hs = S?.hw?.headsets || [];
@@ -104,7 +104,7 @@ function hero() {
       <h3>${esc(g.name)}</h3>
       <div class="pills"><span class="pill ${g.source}">${SOURCE[g.source]}</span>${g.vr_api ? `<span class="pill accent">${API[g.vr_api]}</span>` : ''}</div>
       <div class="row">
-        <button class="btn primary big" data-play="${esc(g.id)}">${icon.play}Play</button>
+        <button class="btn primary big" data-play="${esc(g.id)}" ${S.busy.launching ? 'disabled' : ''}>${icon.play}${S.busy.launching === g.name ? 'Starting…' : 'Play'}</button>
         <button class="btn big" data-game="${esc(g.id)}">Details</button>
         <span class="when">${g.last_played ? 'Last played ' + ago(g.last_played).toLowerCase() : ''}</span>
       </div>
@@ -147,7 +147,7 @@ function libraryBody() {
 function renderDrawer() {
   const d = $('#drawer');
   const g = ui.selected && S?.games.find((x) => x.id === ui.selected);
-  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.ovr]) : null;
+  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.ovr, S.busy.launching]) : null;
   if (sig === drawn.drawer) return;
   drawn.drawer = sig;
   if (!g) { d.hidden = true; d.innerHTML = ''; return; }
@@ -170,7 +170,7 @@ function renderDrawer() {
           ${g.vr_api ? `<span class="pill accent">${API[g.vr_api]}</span>` : ''}
         </div>
         <div class="actions">
-          ${g.installed ? `<button class="btn primary big" data-play="${esc(g.id)}">${icon.play}Play</button>`
+          ${g.installed ? `<button class="btn primary big" data-play="${esc(g.id)}" ${S.busy.launching ? 'disabled' : ''}>${icon.play}${S.busy.launching === g.name ? 'Starting…' : 'Play'}</button>`
             : g.source === 'local' ? '<button class="btn big" disabled>File missing</button>'
             : `<button class="btn primary big" data-play="${esc(g.id)}">${g.source === 'steam' ? 'Install' : 'Get in Meta app'}</button>`}
           ${g.install_dir && g.installed ? `<button class="btn big icon-btn" data-folder="${esc(g.id)}" title="Open folder">${icon.folder}</button>` : ''}
@@ -286,12 +286,24 @@ function accounts() {
   </div>`;
 }
 
+// ---- settings -----------------------------------------------------------------------------
+function settings() {
+  return `<div class="page">
+    <div class="head"><div><h1>Settings</h1></div></div>
+    <div class="card"><div class="row">
+      <div class="grow"><h4>Start Atrium when I sign in</h4><p>Atrium opens with Windows, so your headset is ready before you pick a game.</p></div>
+      <span class="toggle ${S.autostart ? 'on' : ''}" id="autostart"><i></i></span>
+    </div></div>
+  </div>`;
+}
+
 // ---- render -------------------------------------------------------------------------------
 function pageSig() {
   switch (ui.page) {
-    case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, ui.search, ui.source, ui.selected]);
+    case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
+    case 'settings': return JSON.stringify([S.autostart]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
@@ -309,7 +321,7 @@ function render() {
   if (sig !== drawn.sig) {
     drawn.sig = sig;
     if (ui.page === 'library') libraryBody();
-    else main.innerHTML = { devices, runtime, accounts }[ui.page]();
+    else main.innerHTML = { devices, runtime, accounts, settings }[ui.page]();
   }
   renderDrawer();
 }
@@ -318,7 +330,7 @@ function go(page) { ui.page = page; if (page !== 'library') ui.selected = null; 
 
 // ---- events -------------------------------------------------------------------------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],#vr,#refresh,#savekey');
+  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],#vr,#autostart,#refresh,#savekey');
   if (!t) return;
   const d = t.dataset;
   if (d.url !== undefined) { e.preventDefault(); send('openUrl', { url: t.href }); }
@@ -333,6 +345,7 @@ document.addEventListener('click', (e) => {
   else if (d.remove) { ui.selected = null; send('removeGame', { id: d.remove }); }
   else if (d.src) { ui.source = d.src; document.querySelectorAll('#src button').forEach((b) => b.classList.toggle('on', b === t)); render(); }
   else if (t.id === 'vr') send('setVrOnly', { on: !S.vrOnly });
+  else if (t.id === 'autostart') send('setAutostart', { on: !S.autostart });
   else if (t.id === 'refresh') send('refresh');
   else if (t.id === 'savekey') { const k = $('#apikey'); send('saveApiKey', { key: k.value }); k.value = ''; }
 });

@@ -5,6 +5,7 @@
 //! with Meta's own PreventDashLaunch switch) and the platform runtime (store sign-in and
 //! entitlements; Atrium will answer those itself). RemoteDesktopCompanion stays: OVRServer
 //! treats it as a core process and restarts it within a second of closing (tested 2026-10-20).
+use crate::services::headsets::Hardware;
 use crate::sys;
 
 /// What Meta starts besides OVRServer, closed whenever they show up.
@@ -94,14 +95,20 @@ fn dash_off() -> bool {
     false
 }
 
-/// Dash is off and OVRServer is running: nothing to do.
-pub fn ready() -> bool {
-    dash_off() && running()
+/// Only wired PC headsets (Rift CV1, Rift S on USB) need OVRServer: NVIDIA hands their panel to
+/// Meta's direct mode. Nothing else starts it.
+pub fn needed(hw: &Hardware) -> bool {
+    hw.headsets.iter().any(|h| h.via == "USB" && (h.family == "rift" || h.family == "rifts"))
 }
 
-/// Get OVRServer running with Dash off. Meta's service isn't needed: OVRServer runs as the user
-/// on its own (tested 2026-10-20), so Atrium starts it directly when it isn't already up. The
-/// only admin step (UAC) is turning Dash off with Meta's switch, once per PC.
+/// OVRServer answers clients and reports the headset: games can start.
+fn accepts_games() -> bool {
+    crate::services::headsets::meta_probe().is_some_and(|m| m.hmd_present)
+}
+
+/// Get OVRServer running with Dash off and wait until it takes games. Meta's service isn't
+/// needed: OVRServer runs as the user on its own (tested 2026-10-20), so Atrium starts it
+/// directly. The only admin step (UAC) is turning Dash off with Meta's switch, once per PC.
 pub fn prepare() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -125,10 +132,15 @@ pub fn prepare() -> Result<(), String> {
         }
         if !running() {
             start()?;
-            // It accepts games a few seconds after starting.
-            std::thread::sleep(std::time::Duration::from_secs(3));
         }
-        Ok(())
+        // Process up isn't enough: it takes clients a few seconds later.
+        for _ in 0..60 {
+            if accepts_games() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Err("Meta's runtime didn't find the headset. Check its cables and try again".into())
     }
     #[cfg(not(windows))]
     Err("Meta's runtime is Windows only".into())

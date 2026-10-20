@@ -137,7 +137,8 @@ fn usb() -> Vec<(String, String, String)> {
     out
 }
 
-fn meta_probe() -> Option<MetaHmd> {
+/// What Meta's runtime reports (ovrprobe connects to OVRServer like a game does).
+pub fn meta_probe() -> Option<MetaHmd> {
     let probe = sys::native_tool("ovrprobe.exe")?;
     let text = sys::output(probe, &["json"]);
     serde_json::from_str(text.lines().last()?.trim()).ok()

@@ -37,6 +37,8 @@ struct State {
     refreshing: bool,
     signing_in: Option<&'static str>,
     cancel: Arc<AtomicBool>,
+    /// A game being started (waiting for the headset can take a while); one at a time.
+    launching: Option<String>,
 }
 
 pub struct App {
@@ -86,12 +88,13 @@ impl App {
             "games": s.games,
             "hw": s.hw,
             "rt": s.rt,
-            "busy": { "scanning": s.scanning, "refreshing": s.refreshing, "signingIn": s.signing_in },
+            "busy": { "scanning": s.scanning, "refreshing": s.refreshing, "signingIn": s.signing_in, "launching": s.launching },
             "steam": set.steam_account.as_ref().map(|a| json!({ "id": a.steam_id, "name": a.name })),
             "steamKey": set.steam_api_key.is_some(),
             "meta": set.meta_accounts.iter().map(|a| json!({ "id": a.id, "name": a.name, "valid": sys::secret::unseal(&a.token).is_some() })).collect::<Vec<_>>(),
             "localGames": set.local_games.iter().map(|l| json!({ "id": l.id, "name": l.name, "exe": l.exe })).collect::<Vec<_>>(),
             "vrOnly": set.vr_only.unwrap_or(true),
+            "autostart": sys::autostart::enabled(),
             "ovr": launcher::ovr_dir(),
             "modes": set.game_options.iter().map(|(k, v)| (k.clone(), json!(v.mode))).collect::<serde_json::Map<_, _>>(),
             "starts": starts,
@@ -109,8 +112,8 @@ impl App {
             let hw = headsets::detect();
             let st = rt::state(&hw);
             rt::write_backend(&st);
-            // A Rift on Meta's backend: OVRServer runs inside Atrium for as long as Atrium does.
-            if st.chosen.as_ref().is_some_and(|b| b.id == "meta") && meta_runtime::installed() && !meta_runtime::running() {
+            // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does.
+            if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
                 if let Err(e) = meta_runtime::start() {
                     sys::log(&e);
                 }
@@ -241,27 +244,50 @@ impl App {
             "refresh" => self.refresh_owned(),
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };
+                // One launch at a time, and never a second copy of a running game.
+                if let Some(other) = self.st().launching.clone() {
+                    self.notice(format!("Already starting {other}"));
+                    return;
+                }
+                let exe_name = g.exe.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_lowercase());
+                if g.installed && exe_name.is_some_and(|n| sys::processes().contains(&n)) {
+                    self.notice(format!("{} is already running", g.name));
+                    return;
+                }
+                self.st().launching = Some(g.name.clone());
+                self.push();
                 self.spawn(move |app| {
-                    // A game on Meta's backend needs OVRServer up (and Dash off) before it starts.
-                    let on_meta = app.st().rt.as_ref().and_then(|r| r.chosen.as_ref()).is_some_and(|b| b.id == "meta");
-                    if g.installed && on_meta && !meta_runtime::ready() {
-                        if let Err(e) = meta_runtime::prepare() {
-                            app.notice(e);
-                            return;
+                    let r = (|| {
+                        // A wired Rift needs OVRServer up and taking games (and Dash off) first.
+                        let wired = app.st().hw.as_ref().is_some_and(meta_runtime::needed);
+                        if g.installed && wired {
+                            if !meta_runtime::running() {
+                                app.notice("Starting the headset…");
+                            }
+                            meta_runtime::prepare()?;
+                            // Starting OVRServer powers the Rift up and it drops off USB for a
+                            // moment; a hardware pass in that gap picks the wrong backend. Pick
+                            // again now that Meta's runtime reports the headset.
+                            let hw = headsets::detect();
+                            let st = rt::state(&hw);
+                            let mut s = app.st();
+                            s.hw = Some(hw);
+                            s.rt = Some(st);
                         }
-                        meta_runtime::strip();
-                    }
-                    let r = {
                         let mut guard = app.st();
                         let s = &mut *guard;
                         launcher::launch(&g, &mut s.settings, s.rt.as_ref())
-                    };
+                    })();
+                    app.st().launching = None;
                     match r {
                         Ok(()) => {
                             app.notice(if g.installed { format!("Starting {}", g.name) } else { format!("Opening {} in its store", g.name) });
                             app.rescan();
                         }
-                        Err(e) => app.notice(e),
+                        Err(e) => {
+                            app.notice(e);
+                            app.push();
+                        }
                     }
                 });
             }
@@ -282,6 +308,12 @@ impl App {
                 s.settings.vr_only = Some(m["on"].as_bool().unwrap_or(true));
                 s.settings.save();
                 drop(s);
+                self.push();
+            }
+            "setAutostart" => {
+                if !sys::autostart::set(m["on"].as_bool().unwrap_or(false)) {
+                    self.notice("Couldn't change the startup setting");
+                }
                 self.push();
             }
             "signIn" => self.sign_in(if arg("which") == "steam" { "steam" } else { "meta" }),

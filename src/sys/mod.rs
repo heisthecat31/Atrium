@@ -1,5 +1,6 @@
 //! Platform access shared by the services: processes, the Windows registry, Valve's KeyValues
 //! text format, JSON files, the settings file, and sealed secrets.
+pub mod autostart;
 pub mod secret;
 pub mod settings;
 pub mod vdf;
