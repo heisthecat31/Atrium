@@ -50,6 +50,20 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (17:50): **First Quest 3 connection to Atrium.** Atrium headset app installed on the
+  user's Quest 3 (serial 2G0YC5ZG9C01ZN, adb over USB, developer mode). The app starts its OpenXR
+  session through the Khronos loader (broker lookup fails, falls back to
+  /odm/etc/openxr/1/active_runtime.aarch64.json: fine) and waits in its lobby. atrium-service with
+  ATRIUM_STREAM=1 discovers it as `4909.client` (untrusted); after setting `trusted: true` in
+  `%APPDATA%\Atrium\stream\session.json` it connects ("Streaming", playspace 5.6 x 5.3 m) and an
+  OpenXR test app on the Atrium Runtime gets live head poses (flags 0xf). Headset shows black:
+  no encoder yet (expected).
+  - Open: pairing/trust UI in the Atrium app (not hand-edited session.json); ALVR core tries to
+    "restart SteamVR" after a settings change and the first handshake fails (patch it out);
+    controller poses read 0 in a headless test (check once frames flow); ALVR's web API listens
+    on 0.0.0.0:8082 (restrict); Windows firewall rule for atrium-service (UDP 9943/9944).
+  - Next: the video path: a Monado compositor target that hardware-encodes each frame (Vulkan
+    Video / NVENC) and calls alvr_set_video_config_nals + alvr_send_video_nal.
 - 2026-10-20 (16:30): **Atrium Runtime for Windows** (streaming, step 1). `native/atrium_xr_linux`
   renamed `native/atrium_monado`: one pinned Monado + patches, `build.sh` (Linux) and `build.ps1`
   (Windows -> `native\out\monado\`: openxr_atrium.dll, atrium-service.exe, atrium_openxr.json,
