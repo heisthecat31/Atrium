@@ -128,6 +128,10 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     Windows.Devices.Display.Core), but Acquire on the Rift returns NVAPI_UNREGISTERED_RESOURCE
     and making a display dedicated needs NVIDIA's configureDdisplay, which only supports
     RTX Pro/Quadro on Windows 11 Pro/Enterprise. Not GeForce + Win10 Home (this PC).
+    `nvdisplays setedid <id>` (public NvAPI_GPU_SetEDID, maker OVR -> ATR, elevated) returns
+    NVAPI_NOT_SUPPORTED on GeForce, as documented (tried 2026-10-20). The Rift's EDID only reads
+    while the panel is on (`riftprobe drive`, 15 s). No NVIDIA/Windows registry switch for HMD
+    hiding found. That exhausts the public Windows software routes on this PC.
     Remaining routes: hardware EDID adapter, Linux (VK_KHR_display lists hidden HMDs),
     NVIDIA VRWorks licence. Don't use private/undocumented NVAPI entry points.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
