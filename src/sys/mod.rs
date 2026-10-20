@@ -68,13 +68,14 @@ pub fn exe_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default()
 }
 
-/// A native helper (ovrprobe.exe, SteamFrameSim.exe): next to atrium, or in native/out when run
-/// from a source checkout.
+/// A native helper (ovrprobe.exe, SteamFrameSim.exe, atrium-service): next to atrium, or in
+/// native/out (native/out/linux on Linux) when run from a source checkout.
 pub fn native_tool(name: &str) -> Option<PathBuf> {
     let mut c = vec![exe_dir().join(name)];
     let mut d = exe_dir();
     for _ in 0..4 {
-        c.push(d.join("native").join("out").join(name));
+        let out = d.join("native").join("out");
+        c.push(if cfg!(windows) { out.join(name) } else { out.join("linux").join(name) });
         if !d.pop() {
             break;
         }

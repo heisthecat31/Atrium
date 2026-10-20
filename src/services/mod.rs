@@ -1,3 +1,4 @@
+pub mod atrium_service;
 pub mod headsets;
 pub mod launcher;
 pub mod library;

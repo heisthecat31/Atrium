@@ -2,7 +2,7 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}};
+use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}};
 use crate::sys::{self, settings::{GameOptions, LocalGame, Settings}};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,6 +127,12 @@ impl App {
             // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does.
             if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
                 if let Err(e) = meta_runtime::start() {
+                    sys::log(&e);
+                }
+            }
+            // Linux: the Atrium Runtime's own service drives any connected headset.
+            if cfg!(target_os = "linux") && !hw.headsets.is_empty() && atrium_service::available() && !atrium_service::running() {
+                if let Err(e) = atrium_service::start() {
                     sys::log(&e);
                 }
             }
@@ -271,7 +277,10 @@ impl App {
                 self.spawn(move |app| {
                     let r = (|| {
                         // A wired Rift needs OVRServer up and taking games (and Dash off) first.
-                        let wired = app.st().hw.as_ref().is_some_and(meta_runtime::needed);
+                        if g.installed && cfg!(target_os = "linux") && atrium_service::available() {
+                            atrium_service::prepare()?;
+                        }
+                        let wired = cfg!(windows) && app.st().hw.as_ref().is_some_and(meta_runtime::needed);
                         if g.installed && wired {
                             if !meta_runtime::running() {
                                 app.notice("Starting the headset…");

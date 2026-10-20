@@ -1,0 +1,15 @@
+Atrium: report the runtime as "Atrium" (games read runtimeName from xrGetInstanceProperties).
+
+diff --git a/src/xrt/auxiliary/util/u_git_tag.c.in b/src/xrt/auxiliary/util/u_git_tag.c.in
+index 8b8988440..a2b48fcf6 100644
+--- a/src/xrt/auxiliary/util/u_git_tag.c.in
++++ b/src/xrt/auxiliary/util/u_git_tag.c.in
+@@ -14,7 +14,7 @@
+ #define MAJOR_VERSION @CMAKE_PROJECT_VERSION_MAJOR@
+ #define MINOR_VERSION @CMAKE_PROJECT_VERSION_MINOR@
+ #define PATCH_VERSION @CMAKE_PROJECT_VERSION_PATCH@
+-#define RUNTIME_DESCRIPTION "@CMAKE_PROJECT_DESCRIPTION@"
++#define RUNTIME_DESCRIPTION "Atrium"
+ 
+ const char u_git_tag[] = GIT_DESC;
+ const uint16_t u_version_major = MAJOR_VERSION;
