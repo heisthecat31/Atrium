@@ -50,6 +50,26 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (18:25): **First picture on the Quest 3 through Atrium alone.** Khronos hello_xr
+  (D3D11) on the Atrium Runtime (Windows, Monado) -> Atrium compositor -> RGB->NV12 compute ->
+  Vulkan Video H.264 (RTX 5060) -> ALVR server_core over Wi-Fi -> Atrium headset app ->
+  Quest 3 hardware decoder (c2.qti.avc.decoder, first frame 29 ms after arrival): user sees the
+  coloured cubes. No Meta PC software, no SteamVR.
+  - Stream: 2048x2144 per eye (4096 total: H.264 width limit on this GPU), 72 fps, 40 Mbit/s CBR.
+    ALVR's session settings `transcoding_view_resolution` / `emulated_headset_view_resolution`
+    set to Absolute 2048 (ALVR floors the height to /32 from the headset's aspect); HEVC/AV1 would
+    lift the limit.
+  - Fixed on the way: the compositor target must implement get/request refresh rate, and the
+    devices must call u_device_populate_function_pointers (Monado calls optional device functions
+    without NULL checks): both crashed atrium-service right after the first frame.
+  - Test traps: hello_xr quits immediately when its stdin isn't a console (getchar in its
+    "press any key" thread): start it in its own console window. This PC has 5 implicit Vulkan
+    layers (Epic overlay, OBS, Steam overlay, Fossilize, Medal); not the cause here, but suspects
+    for odd Vulkan behaviour.
+  - Open: **Echo VR (D3D12 via Atrium OVR) on this runtime stays black and stalls** (6 frames in
+    22 s, swapchains 8010x4801 from the user's FOV mod), then exits: Monado's Windows D3D12 client
+    compositor path. Also: pairing UI, ALVR "restart SteamVR" on settings change, 0.0.0.0:8082,
+    firewall rule, frame timestamps (currently the latest tracking sample, not the rendered pose's).
 - 2026-10-20 (17:50): **First Quest 3 connection to Atrium.** Atrium headset app installed on the
   user's Quest 3 (serial 2G0YC5ZG9C01ZN, adb over USB, developer mode). The app starts its OpenXR
   session through the Khronos loader (broker lookup fails, falls back to
