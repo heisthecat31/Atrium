@@ -2,7 +2,7 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}};
+use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
 use crate::sys::{self, settings::{GameOptions, LocalGame, Settings}};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -330,6 +330,17 @@ impl App {
                 s.settings.save();
                 drop(s);
                 self.push();
+            }
+            "installAtrium" | "openAtrium" => {
+                let (serial, install) = (arg("serial"), m["cmd"] == "installAtrium");
+                self.spawn(move |app| {
+                    let r = if install { standalone::install(&serial) } else { standalone::open(&serial) };
+                    app.notice(match r {
+                        Ok(()) if install => "Atrium is installed on the headset".to_string(),
+                        Ok(()) => "Opening Atrium on the headset".to_string(),
+                        Err(e) => e,
+                    });
+                });
             }
             "setAutostart" => {
                 if !sys::autostart::set(m["on"].as_bool().unwrap_or(false)) {

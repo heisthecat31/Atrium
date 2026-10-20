@@ -1,0 +1,128 @@
+Atrium: the headset app is "Atrium" (package vr.atrium.client, so it installs next to ALVR), with
+Atrium's arch mark as its icon on Atrium's background.
+
+diff --git a/alvr/client_openxr/Cargo.toml b/alvr/client_openxr/Cargo.toml
+index 152e38d..b2fa80d 100644
+--- a/alvr/client_openxr/Cargo.toml
++++ b/alvr/client_openxr/Cargo.toml
+@@ -26,7 +26,7 @@ libc = "0.2"
+ ndk-context = "0.1"
+ 
+ [package.metadata.android]
+-package = "alvr.client.stable"             # Changed for Meta Store
++package = "vr.atrium.client"
+ install_location = "auto"
+ build_targets = ["aarch64-linux-android"]
+ runtime_libs = "../../deps/android_openxr"
+@@ -82,7 +82,7 @@ authorities = "org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runti
+ debuggable = false
+ theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
+ icon = "@mipmap/ic_launcher"
+-label = "ALVR"
++label = "Atrium"
+ 
+ [package.metadata.android.application.activity]
+ config_changes = "density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+diff --git a/alvr/client_openxr/resources/drawable/ic_launcher_foreground.xml b/alvr/client_openxr/resources/drawable/ic_launcher_foreground.xml
+index 1af9baa..31eebde 100644
+--- a/alvr/client_openxr/resources/drawable/ic_launcher_foreground.xml
++++ b/alvr/client_openxr/resources/drawable/ic_launcher_foreground.xml
+@@ -2,63 +2,29 @@
+     xmlns:aapt="http://schemas.android.com/aapt"
+     android:width="108dp"
+     android:height="108dp"
+-    android:viewportWidth="247.19"
+-    android:viewportHeight="247.2">
+-  <group android:scaleX="0.48997378"
+-      android:scaleY="0.49"
+-      android:translateX="63.03669"
+-      android:translateY="63.036">
+-    <group>
+-      <clip-path
+-          android:pathData="m19.24,27.3 l48.9,43.32 -19.6,44.33 18.17,46.96 -45.21,41.35 2.17,43.95 223.52,-0.01 0.01,-247.19 -215.11,0.14z"/>
+-      <path
+-          android:pathData="M123.59,123.6m-115.38,0a115.38,115.38 0,1 1,230.77 0a115.38,115.38 0,1 1,-230.77 0"
+-          android:strokeWidth="16.4055"
+-          android:fillColor="#00000000">
+-        <aapt:attr name="android:strokeColor">
+-          <gradient 
+-              android:startX="-0"
+-              android:startY="123.6"
+-              android:endX="247.17"
+-              android:endY="123.6"
+-              android:type="linear">
+-            <item android:offset="0" android:color="#FF3ED2E3"/>
+-            <item android:offset="1" android:color="#FF1D89CF"/>
+-          </gradient>
+-        </aapt:attr>
+-      </path>
+-      <path
+-          android:pathData="M123.59,123.6m-85.3,0a85.3,85.3 0,1 1,170.6 0a85.3,85.3 0,1 1,-170.6 0"
+-          android:strokeWidth="15.875"
+-          android:fillColor="#00000000">
+-        <aapt:attr name="android:strokeColor">
+-          <gradient 
+-              android:startX="32.22"
+-              android:startY="123.6"
+-              android:endX="214.95"
+-              android:endY="123.6"
+-              android:type="linear">
+-            <item android:offset="0" android:color="#FF3ED2E3"/>
+-            <item android:offset="1" android:color="#FF2192D1"/>
+-          </gradient>
+-        </aapt:attr>
+-      </path>
+-      <path
+-          android:pathData="M123.59,123.6m-56.33,0a56.33,56.33 0,1 1,112.67 0a56.33,56.33 0,1 1,-112.67 0"
+-          android:strokeWidth="15.5123"
+-          android:fillColor="#00000000">
+-        <aapt:attr name="android:strokeColor">
+-          <gradient 
+-              android:startX="63.25"
+-              android:startY="123.6"
+-              android:endX="183.92"
+-              android:endY="123.6"
+-              android:type="linear">
+-            <item android:offset="0" android:color="#FF3ED2E3"/>
+-            <item android:offset="1" android:color="#FF279ED4"/>
+-          </gradient>
+-        </aapt:attr>
+-      </path>
+-    </group>
++    android:viewportWidth="52"
++    android:viewportHeight="52">
++  <group android:translateX="10" android:translateY="10">
++    <path
++        android:pathData="M6,28V15a10,10 0,0 1,20 0v13"
++        android:strokeWidth="3.2"
++        android:strokeLineCap="round"
++        android:fillColor="#00000000">
++      <aapt:attr name="android:strokeColor">
++        <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="32" android:endY="32"
++            android:startColor="#FF7C9CFF" android:endColor="#FF3BE0C4"/>
++      </aapt:attr>
++    </path>
++    <path
++        android:pathData="M12,28v-9a4,4 0,0 1,8 0v9"
++        android:strokeWidth="3.2"
++        android:strokeLineCap="round"
++        android:strokeAlpha="0.6"
++        android:fillColor="#00000000">
++      <aapt:attr name="android:strokeColor">
++        <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="32" android:endY="32"
++            android:startColor="#FF7C9CFF" android:endColor="#FF3BE0C4"/>
++      </aapt:attr>
++    </path>
+   </group>
+ </vector>
+diff --git a/alvr/client_openxr/resources/values/ic_launcher_background.xml b/alvr/client_openxr/resources/values/ic_launcher_background.xml
+index c5d5899..73eb6bb 100644
+--- a/alvr/client_openxr/resources/values/ic_launcher_background.xml
++++ b/alvr/client_openxr/resources/values/ic_launcher_background.xml
+@@ -1,4 +1,4 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <color name="ic_launcher_background">#FFFFFF</color>
++    <color name="ic_launcher_background">#0B0D12</color>
+ </resources>
+\ No newline at end of file

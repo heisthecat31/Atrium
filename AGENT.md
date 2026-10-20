@@ -37,6 +37,7 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `src/login.rs` | sign-in: Steam via system browser + localhost OpenID return; Meta in a native webview (wry) subprocess (`atrium --login-meta`) that catches the `oculus://` callback |
 | `runtime/` (top level, gitignored) | Meta DLLs copied earlier for research. Locked by OVRServer; never commit |
 | `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI): forwards to the backend in `runtime.json`; trace with `ATRIUM_XR_TRACE=1` -> `logs\xr.log` |
+| `native/atrium_client/` | Atrium's headset app (Quest/Pico): Atrium's build of ALVR's client, `build.ps1` -> `native\outtrium-client.apk`. App side: `src/services/standalone.rs` (adb) |
 | `native/atrium_xr_linux/` | the Atrium Runtime on Linux: Atrium's build of Monado (pinned + `patches/`), `build.sh` -> `native/out/linux/` (`libopenxr_atrium.so`, `atrium-service`, `atrium_openxr.json`). App side: `src/services/atrium_service.rs` |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
@@ -49,6 +50,28 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (16:00): **Atrium streaming, step 1: the headset app** (`native/atrium_client`). User
+  decisions: headset app = Atrium's build of ALVR's client (MIT; not from scratch, not WiVRn: GPL);
+  PC side = the Monado-based Atrium Runtime on Windows too, with an Atrium streaming driver;
+  test device = a Quest. Streamed headsets are the open door on Windows: no GPU direct mode, so
+  no NVIDIA/Meta wall (wired PC headsets on Windows stay on Meta's OVRServer).
+  - `build.ps1`: ALVR v20.14.1 (a9f6542) + patches (0001 Khronos loader only, 0002 name "Atrium",
+    package `vr.atrium.client`, Atrium icon) -> `native\out\atrium-client.apk` (20 MB, arm64).
+    Only the Khronos OpenXR loader is bundled: no Quest 1 / old Pico / YVR / Lynx vendor loaders.
+  - Needs: rustup target aarch64-linux-android, cargo-apk (zarik5 fork, rev 0fd3126dad5a), Android
+    platform 32 (installed into J:\AndroidSdk from dl.google.com, sha1 checked), NDK 30, JDK.
+    ALVR's `openvr` submodule (BSD headers) is needed at build time only.
+  - App side: `src/services/standalone.rs` finds Quest/Pico over adb (developer mode), shows the
+    installed Atrium app version on the Devices page, installs/updates (`adb install -r -g`) and
+    opens it. adb from next to atrium, PATH, or an Android SDK (bundling: later).
+  - Plan for the PC side: ALVR's `server_core` (MIT, Rust) has a C API (alvr_initialize,
+    alvr_poll_event, alvr_get_device_motion, alvr_set_video_config_nals, alvr_send_video_nal,
+    alvr_report_present...). An Atrium Monado driver links it, feeds tracking into Monado and sends
+    the compositor's frames, encoded by a hardware encoder (Vulkan Video / NVENC / AMF / Media
+    Foundation), as NALs. Needs the Atrium Runtime (Monado) built for Windows first. Not tested on a
+    Quest yet. For a protocol check before that, ALVR's own PC streamer speaks the same protocol.
+  - Traps: Windows PowerShell 5.1 + `$ErrorActionPreference='Stop'` treats native stderr as an
+    error when redirected; check `$LASTEXITCODE` instead.
 - 2026-10-20 (15:30-16:00): **OVRPlugin games** (Unity/Unreal with Meta's OVRPlugin, instance
   name "Oculus VR Plugin (...)"). They need the runtime name "Oculus" and locate poses at XrTime 0
   (only Meta's runtime takes that as "now"). Approach from RiftLift's OpenXR layer (MIT), Atrium's

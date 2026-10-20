@@ -209,6 +209,14 @@ function devices() {
       ${hw.controllers.map(([n, via]) => `<div class="item"><i class="dot on"></i>${esc(n)}<span class="sub">${esc(via)}</span></div>`).join('')}
       ${hw.accessories.map((a) => `<div class="item"><i class="dot on"></i>${esc(a.name)}${a.count > 1 ? ` ×${a.count}` : ''}<span class="sub">USB</span></div>`).join('')}
     </div>` : ''}
+    <h2>Standalone headsets</h2>
+    ${hw.standalone.length ? `<div class="card list">${hw.standalone.map((s) => `<div class="item">
+      <i class="dot ${s.state === 'device' ? 'on' : ''}"></i>${esc(s.model || 'Headset')}
+      <span class="sub">${s.state !== 'device' ? 'Allow USB debugging in the headset' : s.atrium_version ? `Atrium ${esc(s.atrium_version)} installed` : 'Atrium not installed'}</span>
+      ${s.state === 'device' && hw.standalone_apk ? `<button class="btn ${s.atrium_version ? 'ghost' : 'primary'}" data-cmd="installAtrium" data-serial="${esc(s.serial)}">${s.atrium_version ? 'Update' : 'Install Atrium'}</button>` : ''}
+      ${s.state === 'device' && s.atrium_version ? `<button class="btn" data-cmd="openAtrium" data-serial="${esc(s.serial)}">Open on headset</button>` : ''}
+    </div>`).join('')}</div>`
+    : '<div class="card"><h4>No Quest or Pico found</h4><p>Turn on developer mode on the headset, plug it in over USB and allow USB debugging. Atrium installs its headset app from here.</p></div>'}
     <h2>VR software</h2>
     <div class="chips">
       <span class="chip"><i class="dot ${hw.meta_running ? 'on' : ''}"></i>Meta runtime</span>
@@ -338,7 +346,7 @@ document.addEventListener('click', (e) => {
   else if (d.play) { e.stopPropagation(); send('launch', { id: d.play }); }
   else if (d.game) { ui.selected = d.game; render(); }
   else if (d.close !== undefined) { ui.selected = null; render(); }
-  else if (d.cmd) send(d.cmd);
+  else if (d.cmd) send(d.cmd, d.serial ? { serial: d.serial } : undefined);
   else if (d.signin) send('signIn', { which: d.signin });
   else if (d.signout) send('signOut', { which: d.signout, id: d.id });
   else if (d.folder) send('openFolder', { id: d.folder });

@@ -62,6 +62,10 @@ pub struct Hardware {
     pub streaming: Vec<Streamer>,
     pub sim_running: bool,
     pub sim_available: bool,
+    /// Quest/Pico headsets adb sees (developer mode), with the Atrium app's version on each
+    pub standalone: Vec<crate::services::standalone::Standalone>,
+    /// the Atrium headset app is built and can be installed
+    pub standalone_apk: bool,
 }
 
 impl Hardware {
@@ -170,6 +174,8 @@ pub fn detect() -> Hardware {
     }
     hw.sim_running = procs.contains("steamframesim.exe");
     hw.sim_available = sys::native_tool("SteamFrameSim.exe").is_some();
+    hw.standalone = crate::services::standalone::detect();
+    hw.standalone_apk = crate::services::standalone::apk().is_some();
     hw.steamvr_running = procs.contains("vrserver.exe") || procs.contains("vrserver");
     hw.streaming = STREAMERS.iter().map(|(id, name, p)| Streamer { id, name, running: p.iter().any(|x| procs.contains(*x)) }).collect();
 

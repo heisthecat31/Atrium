@@ -1,0 +1,32 @@
+Atrium: load only the Khronos OpenXR loader. Atrium ships no vendor loader binaries; Quest 2/3/3S/Pro
+and current Pico firmware load their runtime through the Khronos loader.
+
+diff --git a/alvr/client_openxr/src/lib.rs b/alvr/client_openxr/src/lib.rs
+index 3e35add..4299ea2 100644
+--- a/alvr/client_openxr/src/lib.rs
++++ b/alvr/client_openxr/src/lib.rs
+@@ -138,20 +138,10 @@ pub fn entry_point() {
+ 
+     let platform = alvr_system_info::platform();
+ 
+-    let loader_suffix = match platform {
+-        Platform::Quest1 => "_quest1",
+-        Platform::PicoNeo3
+-        | Platform::PicoG3
+-        | Platform::Pico4
+-        | Platform::Pico4Pro
+-        | Platform::Pico4Enterprise => "_pico_old",
+-        p if p.is_yvr() => "_yvr",
+-        Platform::Lynx => "_lynx",
+-        _ => "",
+-    };
+-    let xr_entry = unsafe {
+-        xr::Entry::load_from(Path::new(&format!("libopenxr_loader{loader_suffix}.so"))).unwrap()
+-    };
++    // Atrium ships only the Khronos OpenXR loader (no vendor binaries); Quest 2/3/3S/Pro and
++    // current Pico firmware load their runtime through it.
++    let _ = platform;
++    let xr_entry = unsafe { xr::Entry::load_from(Path::new("libopenxr_loader.so")).unwrap() };
+ 
+     #[cfg(target_os = "android")]
+     xr_entry.initialize_android_loader().unwrap();
