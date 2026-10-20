@@ -71,8 +71,9 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   - RiftLift (MIT) on Linux is game-side only (Revive-derived bridges under GE-Proton crossing to
     the host runtime via Wine unixlib, a Platform SDK shim, xrizer); it "doesn't install headset
     drivers or VR runtimes". Atrium copies that approach in its own code for the game side.
-  - Next: Linux game side (Atrium OVR under Proton reaching the host Atrium Runtime; signed-shim
-    games have no Meta DLL to load on Linux), udev rules for the Rift, packaging.
+  - Next: Linux game side (Atrium OVR under Proton reaches the host Atrium Runtime through GE-Proton's
+    wineopenxr, as RiftLift does; signed-shim games have no Meta DLL to load on Linux: open, and
+    not via a faked signature), udev rules for the Rift, packaging.
 - 2026-10-20 (later): `src/login.rs` written. Meta: parent runs `begin_login`, spawns
   `atrium --login-meta`, sends the auth URL on **stdin**; child (tao + wry, incognito, WebView2
   data in `%APPDATA%\Atrium\webview`) blocks the `oculus://`/`oculus-client://` navigation and
@@ -94,7 +95,9 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   find the unsigned copy and stop). Verified with `atrium --translate native\out\ovrprobe.exe
   json`: Revive's HMD desc + the emulated HMD's 2880x1600 over Meta's OpenXR runtime.
   `XR_RUNTIME_JSON` = Atrium Runtime manifest when built, else the backend Atrium chose.
-  Open: no-Meta-installed case (hook WinVerifyTrust + cert helpers, or ship a stand-in);
+  Open: no-Meta-installed case. **Not** by faking the signature check (making WinVerifyTrust /
+  cert names report Atrium OVR as signed by Oculus VR, LLC): that forges a code-signing identity;
+  declined 2026-10-20. Older games without the check load Atrium OVR via LIBOVR_DLL_DIR;
   port EchoXR's generic Revive fixes; LibOVRPlatform stand-in for games that need entitlement.
 - 2026-10-20 (11:30-11:53): first real game. Echo VR runs through Atrium OVR (injection works on a
   signed-shim game). Revive changes live as patches in `native/atrium_ovr/patches/` (applied by
