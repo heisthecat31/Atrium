@@ -1,0 +1,9 @@
+{
+    "appPrefix": "CR5",
+    "locale":{
+        "err_missing_cfg":"ERR:404:CFG\n----------------------------------------\nThe Game Configuration is missing!\n\nPlease Ensure /game/config/game.json exists!\n",
+        "err_loadfail_cfg": "ERR:300:CFG\n----------------------------------------\nThe Game Configuration is misconfigured!\n\nPlease Ensure /game/config/game.json contains the correct configuration!\nPlease re-download the Game if the Error persists.\n",
+        "err_missing_bin":"ERR:404:BIN\n----------------------------------------\nThe Game Binaries are missing!\nPlease Ensure /game/bin/x64/ contains your Game Binaries!\n",
+        "err_missing_console":"ERR:404:CRC\n----------------------------------------\nThe Console Binaries are missing!\n\nPlease Ensure /game/engine/crc contains your Console Binaries!\n"
+    }
+}
