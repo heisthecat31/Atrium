@@ -20,3 +20,6 @@
 *.lib binary
 *.dll binary
 *.exe binary
+
+# Patches apply to upstream sources byte for byte: never convert their line endings.
+*.patch -text
