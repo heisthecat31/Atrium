@@ -24,6 +24,14 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 if not exist out\ovr mkdir out\ovr
 copy /y atrium_ovr\build\out\ovr\LibOVRRT64_1.dll out\ovr\ >nul
 
+rem The Atrium Runtime (atrium_xr\): Atrium's OpenXR runtime, atrium_xr.dll + atrium_openxr.json.
+cmake -S atrium_xr -B atrium_xr\build -A x64 >nul
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+cmake --build atrium_xr\build --config Release --parallel
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+copy /y atrium_xr\build\out\atrium_xr.dll out\ >nul
+copy /y atrium_xr\build\out\atrium_openxr.json out\ >nul
+
 rem Oculus SDK headers: a local copy in third_party\LibOVR, else the one CMake fetched above.
 set "OVR=third_party\LibOVR"
 if not exist "%OVR%\Include\OVR_CAPI.h" set "OVR=atrium_ovr\build\_deps\ovr_sdk-src\LibOVR"

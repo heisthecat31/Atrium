@@ -18,3 +18,5 @@ Thumbs.db
 .DS_Store
 /native/atrium_ovr/build/
 /native/atrium_ovr/*.log
+/native/atrium_xr/build/
+/native/atrium_xr/*.log

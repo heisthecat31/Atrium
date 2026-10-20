@@ -1,7 +1,7 @@
 From 478e1b9a637a9c7183633a7b681d967a20b7caba Mon Sep 17 00:00:00 2001
 From: Atrium <atrium@localhost>
 Date: Tue, 20 Oct 2026 11:50:19 +0100
-Subject: [PATCH 3/3] Atrium OVR: trace depth projection; ATRIUM_OVR_DEPTH=0
+Subject: [PATCH 3/7] Atrium OVR: trace depth projection; ATRIUM_OVR_DEPTH=0
  turns depth layers off
 
 ---

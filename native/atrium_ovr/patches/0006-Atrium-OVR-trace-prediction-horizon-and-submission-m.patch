@@ -1,0 +1,40 @@
+From fe7b6a906ed290716faba7be9bcdae9ec792ef3a Mon Sep 17 00:00:00 2001
+From: Atrium <atrium@localhost>
+Date: Tue, 20 Oct 2026 12:12:17 +0100
+Subject: [PATCH 6/7] Atrium OVR: trace prediction horizon and submission
+ margin
+
+---
+ ReviveXR/REV_CAPI.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index c209e40..e8690d2 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -419,7 +419,8 @@ OVR_PUBLIC_FUNCTION(ovrTrackingState) ovr_GetTrackingState(ovrSession session, d
+ 	if (AtriumOvrEverySecond(&lastTrace))
+ 	{
+ 		const ovrPosef& h = state.HeadPose.ThePose;
+-		AtriumOvrLog("tracking: head flags 0x%x pos %+.3f %+.3f %+.3f rot %+.3f %+.3f %+.3f %+.3f; hands 0x%x 0x%x",
++		AtriumOvrLog("tracking for %+.1f ms from now: head flags 0x%x pos %+.3f %+.3f %+.3f rot %+.3f %+.3f %+.3f %+.3f; hands 0x%x 0x%x",
++			(absTime - ovr_GetTimeInSeconds()) * 1000.0,
+ 			state.StatusFlags, h.Position.x, h.Position.y, h.Position.z,
+ 			h.Orientation.x, h.Orientation.y, h.Orientation.z, h.Orientation.w,
+ 			state.HandStatusFlags[0], state.HandStatusFlags[1]);
+@@ -1228,8 +1229,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 	static long long lastTrace = 0;
+ 	if (AtriumOvrEverySecond(&lastTrace))
+ 	{
+-		AtriumOvrLog("frame %lld: %u layers in, %u out, predicted %lld, shouldRender %d", frameIndex, layerCount,
+-			(unsigned)layers.size(), (long long)TargetFrame->predictedDisplayTime, (int)TargetFrame->shouldRender);
++		const XrTime nowXr = AbsTimeToXrTime(session->Instance, ovr_GetTimeInSeconds());
++		AtriumOvrLog("frame %lld (current %lld): %u layers in, %u out, submitted %+.1f ms before its display time, shouldRender %d",
++			frameIndex, (long long)session->CurrentFrame.load()->frameIndex, layerCount, (unsigned)layers.size(),
++			(TargetFrame->predictedDisplayTime - nowXr) / 1e6, (int)TargetFrame->shouldRender);
+ 		for (unsigned int l = 0; l < layerCount; l++)
+ 		{
+ 			const ovrLayerHeader* h = layerPtrList[l];
+-- 
+2.52.0.windows.1
+

@@ -15,7 +15,8 @@ One open-source home for every VR headset and every VR game.
   headset.
 
 Status: early. The app runs: headset detection, a merged Steam/Meta/local library, launching, and
-Steam/Meta sign-in. The Atrium Runtime itself is in progress.
+Steam/Meta sign-in. The Atrium Runtime (v1: drives the headset through the vendor runtime) and
+Atrium OVR run Echo VR on a Rift CV1.
 
 ## Layout
 
@@ -28,6 +29,7 @@ Steam/Meta sign-in. The Atrium Runtime itself is in progress.
 | `src/login.rs` | Steam (OpenID) and Meta (native SSO) sign-in |
 | `native/` | C++ tools and the Atrium Runtime (MSVC) |
 | `native/atrium_ovr/` | Atrium OVR, the Oculus SDK → OpenXR translation layer (CMake) |
+| `native/atrium_xr/` | the Atrium Runtime, Atrium's OpenXR runtime (CMake) |
 | `Dashboard/` | the in-VR dashboard (Unity) |
 | `assets/` | icon and headset line art |
 

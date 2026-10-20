@@ -1,0 +1,76 @@
+From 70441a9e93dc743697ed696c1b3ff28a4ba7f9bb Mon Sep 17 00:00:00 2001
+From: Atrium <atrium@localhost>
+Date: Tue, 20 Oct 2026 12:09:24 +0100
+Subject: [PATCH 5/7] Atrium OVR: crop eye images to the runtime's field of
+ view
+
+---
+ ReviveXR/REV_CAPI.cpp | 52 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index ae9ecb5..c209e40 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -1095,6 +1095,58 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 				view.subImage.swapchain = texture->Swapchain;
+ 				view.subImage.imageRect = ClampRect(layer->EyeFov.Viewport[i], texture);
+ 				view.subImage.imageArrayIndex = 0;
++
++				// Atrium OVR: show only the part of the eye image inside the field of view the runtime can
++				// display. Some games render wider than the runtime offers (Echo VR draws its own fixed,
++				// larger FOV); SteamVR displays that correctly, but Meta's OpenXR runtime then shows the frame
++				// at the wrong scale, so the world swims with the head and looks magnified. A projection is
++				// linear in tangent space, so cropping the rectangle and reporting the cropped FOV is exact.
++				// ATRIUM_OVR_CROP_FOV=0 turns this off.
++				static const bool cropFov = [] { char v[8] = {}; return !(GetEnvironmentVariableA("ATRIUM_OVR_CROP_FOV", v, sizeof(v)) && v[0] == '0'); }();
++				if (cropFov && type != ovrLayerType_EyeMatrix)
++				{
++					const XR::FovPort rendered(layer->EyeFov.Fov[i]);
++					const XR::FovPort limit(session->ViewFov[i].maxMutableFov);
++					XR::FovPort shown = rendered;
++					shown.LeftTan = std::min(rendered.LeftTan, limit.LeftTan);
++					shown.RightTan = std::min(rendered.RightTan, limit.RightTan);
++					shown.UpTan = std::min(rendered.UpTan, limit.UpTan);
++					shown.DownTan = std::min(rendered.DownTan, limit.DownTan);
++					const float eps = 1e-3f;
++					if (shown.LeftTan < rendered.LeftTan - eps || shown.RightTan < rendered.RightTan - eps ||
++						shown.UpTan < rendered.UpTan - eps || shown.DownTan < rendered.DownTan - eps)
++					{
++						// Row 0 is the top of the view unless the image is flipped (see above).
++						const bool flip = texture->Images->type == XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR ? !upsideDown : upsideDown;
++						const float tw = rendered.LeftTan + rendered.RightTan, th = rendered.UpTan + rendered.DownTan;
++						const float firstR = flip ? rendered.DownTan : rendered.UpTan, firstS = flip ? shown.DownTan : shown.UpTan;
++						const float secondS = flip ? shown.UpTan : shown.DownTan;
++						const float fx0 = (rendered.LeftTan - shown.LeftTan) / tw, fx1 = (rendered.LeftTan + shown.RightTan) / tw;
++						const float fy0 = (firstR - firstS) / th, fy1 = (firstR + secondS) / th;
++						auto cropRect = [&](XrRect2Di& r)
++						{
++							const float w = (float)r.extent.width, h = (float)r.extent.height;
++							const int x0 = (int)lroundf(fx0 * w), x1 = (int)lroundf(fx1 * w);
++							const int y0 = (int)lroundf(fy0 * h), y1 = (int)lroundf(fy1 * h);
++							r.offset.x += x0;
++							r.offset.y += y0;
++							r.extent.width = std::max(1, x1 - x0);
++							r.extent.height = std::max(1, y1 - y0);
++						};
++						cropRect(view.subImage.imageRect);
++						if (view.next)
++							cropRect(((XrCompositionLayerDepthInfoKHR*)view.next)->subImage.imageRect);
++						view.fov = shown;
++						if (flip)
++							OVR::OVRMath_Swap(view.fov.angleUp, view.fov.angleDown);
++						static long long lastCropTrace[ovrEye_Count] = {};
++						if (AtriumOvrEverySecond(&lastCropTrace[i]))
++							AtriumOvrLog("  eye %d fov cropped: rendered tan L%.3f R%.3f U%.3f D%.3f, runtime max L%.3f R%.3f U%.3f D%.3f -> rect %d,%d %dx%d",
++								i, rendered.LeftTan, rendered.RightTan, rendered.UpTan, rendered.DownTan, limit.LeftTan, limit.RightTan, limit.UpTan,
++								limit.DownTan, view.subImage.imageRect.offset.x, view.subImage.imageRect.offset.y,
++								view.subImage.imageRect.extent.width, view.subImage.imageRect.extent.height);
++					}
++				}
+ 			}
+ 
+ 			// Verify all views were initialized without errors, otherwise ignore the layer
+-- 
+2.52.0.windows.1
+

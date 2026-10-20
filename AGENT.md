@@ -36,7 +36,7 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `web/` | the page: `index.html`, `app.css` (palette in `:root`), `app.js` (renders from the snapshot, `ipc.postMessage` for actions), `icons.js` (our line art) |
 | `src/login.rs` | sign-in: Steam via system browser + localhost OpenID return; Meta in a native webview (wry) subprocess (`atrium --login-meta`) that catches the `oculus://` callback |
 | `runtime/` (top level, gitignored) | Meta DLLs copied earlier for research. Locked by OVRServer; never commit |
-| `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI) |
+| `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI): forwards to the backend in `runtime.json`; trace with `ATRIUM_XR_TRACE=1` -> `logs\xr.log` |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
 | `native/atrium_ovr/` | Atrium OVR: CMake fetches pinned Revive/OpenXR SDK/Oculus SDK/Detours, builds `LibOVRRT64_1.dll` (static CRT + static OpenXR loader, one DLL). Log: `%APPDATA%\Atrium\logs\ovr.log` |
@@ -78,12 +78,34 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   0002 EchoXR's generic session/frame fixes (no frame begun in BeginSession, recenter after the
   first xrWaitFrame, wait for READY in the FOV probe on every runtime, opaque eye layers,
   request OpenXR 1.0), 0003 depth trace + `ATRIUM_OVR_DEPTH=0`.
-  **Open bug:** on Meta's OpenXR runtime (Rift CV1) the picture moves with the head, although the
-  trace shows good head poses, non-head-locked EyeFovDepth layers at 90 fps, no XR errors and
-  sane depth (near 0.05, far 1023); depth off doesn't help. Same build on SteamVR's runtime is
-  correct, and Echo direct on Meta is correct. So translated games prefer SteamVR
-  (`launcher::xr_runtime`); `ATRIUM_XR=<manifest>` overrides for `--translate`. Next suspects:
-  frame/pose timing vs Meta's runtime (absTime -> XrTime), D3D12 image handover on Meta.
+  The "picture moves with the head" bug on Meta's OpenXR runtime: see the next entry.
+- 2026-10-20 (12:00-12:24): **Atrium Runtime v1** (`native/atrium_xr`) and the Meta bug fixed.
+  - Runtime: `atrium_xr.dll` + `atrium_openxr.json`, exports `xrNegotiateLoaderRuntimeInterface`,
+    loads the backend named in `%APPDATA%\Atrium\runtime.json` (`ATRIUM_XR_BACKEND` overrides),
+    negotiates with it and hands out its functions directly; wraps `xrGetInstanceProperties`
+    (name "Atrium (<backend>)") and, with `ATRIUM_XR_TRACE=1`, traces sessions, spaces,
+    swapchains, image acquire/release counts, xrWaitFrame and xrEndFrame to `logs\xr.log`.
+    Verified: Echo VR -> Atrium OVR -> Atrium Runtime -> Meta, and -> SteamVR.
+  - Root cause of the Meta bug: the user's **Echo FOV mod** renders a wider FOV (tan L1.35 R1.00
+    U1.42 D1.78) than Meta's OpenXR runtime offers for the CV1 (L0.97 R0.72 U0.89 D1.11). Meta's
+    native LibOVR path displays such frames fine (and uses the extra as a reprojection margin);
+    **Meta's OpenXR runtime shows projection views wider than its max FOV at the wrong scale**
+    (world swims with the head, looks magnified); SteamVR's handles them. D3D11 trailer was fine
+    only because it renders the default FOV. Fix = Revive patch 0005: crop each eye's rect to
+    the runtime's max FOV and report the cropped FOV (exact; `ATRIUM_OVR_CROP_FOV=0` off).
+    Ruled out on the way: formats (Meta offers 29/45; Meta's images are TYPELESS 27 with
+    SIMULTANEOUS_ACCESS), depth, the VD implicit layer, swapchain copy (tried, reverted: cost GPU).
+  - Lobby at 30 fps was **SteamVR left running** from a test (its compositor shared the GPU);
+    with it closed Echo holds ~85-90. Killing SteamVR mid-session left the Rift black until
+    Echo restarted.
+  - Launcher: no SteamVR preference any more. Games Atrium starts use the Atrium Runtime
+    (`XR_RUNTIME_JSON`, per launch, no system registration); Auto sends Oculus SDK games through
+    Atrium OVR whenever it's built; `runtime.json` is rewritten before every launch.
+  - Revive patches now: 0001 trace, 0002 EchoXR session/frame fixes, 0003 depth trace/switch,
+    0004 D3D12 negotiated format, 0005 FOV crop, 0006 timing trace, 0007 pixelsPerDisplayPixel.
+  - Open: games Steam starts can only reach the Atrium Runtime if it's registered system-wide
+    (Runtime page button, UAC); Atrium Runtime is Windows-only so far; no-Meta-installed case for
+    signed-shim games; LibOVRPlatform stand-in.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic

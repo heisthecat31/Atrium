@@ -46,31 +46,22 @@ pub fn ovr_dir() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
-/// The OpenXR runtime a translated game should use: the Atrium Runtime when it's built; until
-/// then SteamVR's if it's installed, else the vendor backend Atrium picked for the headset.
-///
-/// Not Meta's OpenXR runtime when SteamVR is there: Echo VR through Atrium OVR on Meta's
-/// runtime (Rift CV1, 2026-10-20) tracks and submits correctly by the logs, yet the picture
-/// moves with the head; the same build on SteamVR (which drives the Rift through Meta's
-/// driver) is correct. Cause not found yet.
+/// The OpenXR runtime games started by Atrium use: the Atrium Runtime when it's built (it drives
+/// the headset through the backend in runtime.json), else the vendor backend Atrium picked.
 pub fn xr_runtime(rt: Option<&RuntimeState>) -> Option<PathBuf> {
-    let backends = rt.map(|r| r.backends.as_slice()).unwrap_or_default();
-    runtime::manifest()
-        .or_else(|| backends.iter().find(|b| b.id == "steamvr").map(|b| b.manifest.clone()))
-        .or_else(|| rt.and_then(|r| r.chosen.as_ref()).map(|b| b.manifest.clone()))
+    runtime::manifest().or_else(|| rt.and_then(|r| r.chosen.as_ref()).map(|b| b.manifest.clone()))
 }
 
-pub fn mode(game: &Game, settings: &Settings, rt: Option<&RuntimeState>) -> Mode {
+pub fn mode(game: &Game, settings: &Settings, _rt: Option<&RuntimeState>) -> Mode {
     let chosen = settings.game_options.get(&game.id).map(|o| o.mode.as_str()).unwrap_or("auto");
     let can_translate = game.exe.is_some() && ovr_dir().is_some();
-    let meta_drives = rt.and_then(|r| r.chosen.as_ref()).is_some_and(|b| b.id == "meta");
     match (chosen, game.source) {
         ("steam", Source::Steam) => Mode::Steam,
         ("direct", _) if game.exe.is_some() => Mode::Direct,
         ("translate", _) if can_translate => Mode::Translate,
         (_, Source::Steam) => Mode::Steam,
-        // Oculus SDK games: Meta's own runtime when it drives the headset, Atrium OVR otherwise.
-        _ if game.vr_api == Some("oculus") && can_translate && !meta_drives => Mode::Translate,
+        // Oculus SDK games go through Atrium OVR whenever it's built, so they only see Atrium.
+        _ if game.vr_api == Some("oculus") && can_translate => Mode::Translate,
         _ => Mode::Direct,
     }
 }
@@ -118,13 +109,25 @@ pub fn launch(game: &Game, settings: &mut Settings, rt: Option<&RuntimeState>) -
         }
         return open::that(url).map_err(|e| e.to_string());
     }
+    // The Atrium Runtime reads its backend when the game starts; make sure it's current.
+    if let Some(st) = rt {
+        runtime::write_backend(st);
+    }
     let mode = mode(game, settings, rt);
     match mode {
         Mode::Steam => open::that(format!("steam://rungameid/{}", game.app_id)).map_err(|e| format!("Couldn't start Steam: {e}"))?,
         Mode::Direct => {
             let exe = game.exe.as_ref().ok_or("No executable known for this game")?;
             let dir = exe.parent().map(Path::to_path_buf).or_else(|| game.install_dir.clone()).unwrap_or_default();
-            Command::new(exe).args(split_args(&game.args)).current_dir(dir).spawn().map_err(|e| format!("Couldn't start {}: {e}", game.name))?;
+            let mut cmd = Command::new(exe);
+            cmd.args(split_args(&game.args)).current_dir(dir);
+            // OpenXR games started here run on the Atrium Runtime even when it isn't the system's.
+            if game.vr_api == Some("openxr") {
+                if let Some(m) = runtime::manifest() {
+                    cmd.env("XR_RUNTIME_JSON", m);
+                }
+            }
+            cmd.spawn().map_err(|e| format!("Couldn't start {}: {e}", game.name))?;
         }
         Mode::Translate => {
             let exe = game.exe.as_ref().ok_or("No executable known for this game")?;

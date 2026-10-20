@@ -1,0 +1,36 @@
+From 1e74ffb8623d9edd02b9bac600a6b27b5463e26c Mon Sep 17 00:00:00 2001
+From: Atrium <atrium@localhost>
+Date: Tue, 20 Oct 2026 12:19:42 +0100
+Subject: [PATCH 7/7] Atrium OVR: honour pixelsPerDisplayPixel in
+ ovr_GetFovTextureSize
+
+---
+ ReviveXR/REV_CAPI.cpp | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index e8690d2..050da18 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -845,11 +845,15 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
+ {
+ 	REV_TRACE(ovr_GetFovTextureSize);
+ 
+-	// TODO: Add support for pixelsPerDisplayPixel
++	// Atrium OVR: pixelsPerDisplayPixel is the game's resolution scale; upstream ignored it and
++	// always gave full size, so games set below 1.0 rendered far more pixels than on Oculus's runtime.
++	const float scale = pixelsPerDisplayPixel > 0.0f ? pixelsPerDisplayPixel : 1.0f;
+ 	ovrSizei size = {
+-		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan)),
+-		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan)),
++		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan) * scale),
++		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan) * scale),
+ 	};
++	AtriumOvrLog("ovr_GetFovTextureSize eye %d: fov tan L%.3f R%.3f U%.3f D%.3f, pixelsPerDisplayPixel %.3f -> %dx%d",
++		(int)eye, fov.LeftTan, fov.RightTan, fov.UpTan, fov.DownTan, pixelsPerDisplayPixel, size.w, size.h);
+ 	return size;
+ }
+ 
+-- 
+2.52.0.windows.1
+

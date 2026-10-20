@@ -1,7 +1,7 @@
 From e195a14f66eb55978586c5568da574a1f39e26a5 Mon Sep 17 00:00:00 2001
 From: Atrium <atrium@localhost>
 Date: Tue, 20 Oct 2026 11:39:39 +0100
-Subject: [PATCH 2/3] Atrium OVR: session and frame fixes (after EchoXR)
+Subject: [PATCH 2/7] Atrium OVR: session and frame fixes (after EchoXR)
 
 ---
  ReviveXR/REV_CAPI.cpp | 20 +++++++++++++++++++-
