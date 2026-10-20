@@ -131,7 +131,10 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     `nvdisplays setedid <id>` (public NvAPI_GPU_SetEDID, maker OVR -> ATR, elevated) returns
     NVAPI_NOT_SUPPORTED on GeForce, as documented (tried 2026-10-20). The Rift's EDID only reads
     while the panel is on (`riftprobe drive`, 15 s). No NVIDIA/Windows registry switch for HMD
-    hiding found. That exhausts the public Windows software routes on this PC.
+    hiding found, and none among the driver's 129 DRS settings (public NvAPI_DRS_*, only old
+    3D Vision stereo + VRR). With the panel on, WinRT DisplayManager still lists only the 2
+    desktop monitors; Vulkan exposes no VK_KHR_display / VK_EXT_direct_mode_display /
+    VK_NV_acquire_winrt_display. That exhausts the public Windows software routes on this PC.
     Remaining routes: hardware EDID adapter, Linux (VK_KHR_display lists hidden HMDs),
     NVIDIA VRWorks licence. Don't use private/undocumented NVAPI entry points.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
