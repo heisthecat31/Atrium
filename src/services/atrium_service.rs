@@ -47,7 +47,9 @@ pub fn start() -> Result<(), String> {
         let exe = sys::native_tool("atrium-service").ok_or("The Atrium Runtime isn't built (native/atrium_xr_linux/build.sh)")?;
         let log = std::fs::File::create(sys::data_dir().join("service.log")).map_err(|e| e.to_string())?;
         let mut cmd = std::process::Command::new(&exe);
-        cmd.current_dir(exe.parent().unwrap_or(std::path::Path::new("."))).stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+        // stdin must be a pipe: the service watches it for console commands and won't start on
+        // /dev/null (epoll can't watch it). Atrium keeps the pipe open in the stored Child.
+        cmd.current_dir(exe.parent().unwrap_or(std::path::Path::new("."))).stdin(std::process::Stdio::piped()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
         // End with Atrium, however Atrium ends.
         unsafe {
             cmd.pre_exec(|| {

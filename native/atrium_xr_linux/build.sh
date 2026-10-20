@@ -19,6 +19,11 @@ set -euo pipefail
 MONADO_URL=https://gitlab.freedesktop.org/monado/monado.git
 MONADO_COMMIT=5bca1effb30aed2ce68d805cddff1bc87b67005e   # main, 2026-10-20
 
+# Under WSL, PATH carries every Windows folder (/mnt/c/...); CMake's package search walks PATH
+# and crawls them over WSL's slow file bridge for minutes per lookup. Linux folders only.
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd: -)"
+export PATH
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/../out/linux"
 WORK="${1:-$HOME/.cache/atrium-build}"
