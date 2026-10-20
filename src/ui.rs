@@ -8,6 +8,10 @@
 //!
 //! The window has no system title bar (like Meta's app): the page draws its own top bar with
 //! minimise / maximise / close, and asks Rust to move or resize the window (`UiEvent::Window`).
+//!
+//! Closing asks "Close to tray instead?" (or does what the user chose in Settings). In the tray
+//! Atrium keeps running: OVRServer for a wired Rift, the streaming service, the hardware watch.
+//! The tray icon opens the window again; its menu can quit. `atrium --tray` starts in the tray.
 use crate::app::{App, UiEvent, WindowAction};
 use crate::sys;
 use std::borrow::Cow;
@@ -65,7 +69,40 @@ fn serve(req: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     Response::builder().header(CONTENT_TYPE, mime).header("Cache-Control", cache).body(body).unwrap()
 }
 
-pub fn run() -> ! {
+/// The tray icon: click opens the window, the menu opens or quits. Its events go to the event
+/// loop as window actions.
+fn tray(proxy: tao::event_loop::EventLoopProxy<UiEvent>) -> Option<tray_icon::TrayIcon> {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let img = image::load_from_memory(include_bytes!("../assets/atrium.png")).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    let icon = tray_icon::Icon::from_rgba(img.into_raw(), w, h).ok()?;
+    let open = MenuItem::new("Open Atrium", true, None);
+    let quit = MenuItem::new("Quit Atrium", true, None);
+    let menu = Menu::new();
+    menu.append_items(&[&open, &PredefinedMenuItem::separator(), &quit]).ok()?;
+    let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+    let p = proxy.clone();
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        let action = if e.id == quit_id { WindowAction::Quit } else if e.id == open_id { WindowAction::Show } else { return };
+        let _ = p.send_event(UiEvent::Window(action));
+    }));
+    TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+            let _ = proxy.send_event(UiEvent::Window(WindowAction::Show));
+        }
+    }));
+    TrayIconBuilder::new()
+        .with_tooltip("Atrium")
+        .with_icon(icon)
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .build()
+        .map_err(|e| sys::log(&format!("tray: {e}")))
+        .ok()
+}
+
+pub fn run(start_in_tray: bool) -> ! {
     let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("Atrium")
@@ -73,7 +110,8 @@ pub fn run() -> ! {
         .with_min_inner_size(LogicalSize::new(960.0, 600.0))
         .with_window_icon(crate::login::window_icon())
         .with_theme(Some(tao::window::Theme::Dark))
-        .with_decorations(false);
+        .with_decorations(false)
+        .with_visible(!start_in_tray);
     #[cfg(windows)]
     let window = {
         use tao::platform::windows::WindowBuilderExtWindows;
@@ -87,6 +125,7 @@ pub fn run() -> ! {
         });
 
     let app = App::new(event_loop.create_proxy());
+    let tray_icon = tray(event_loop.create_proxy());
     let ipc_app = app.clone();
     let mut ctx = WebContext::new(Some(sys::data_dir().join("webview-ui")));
     let builder = WebViewBuilder::new_with_web_context(&mut ctx)
@@ -124,7 +163,7 @@ pub fn run() -> ! {
 
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
-        let _keep = (&window, &app);
+        let _keep = (&window, &app, &tray_icon);
         match event {
             Event::UserEvent(UiEvent::Script(js)) => {
                 let _ = webview.evaluate_script(&js);
@@ -135,7 +174,19 @@ pub fn run() -> ! {
                 }
                 WindowAction::Minimize => window.set_minimized(true),
                 WindowAction::ToggleMaximize => window.set_maximized(!window.is_maximized()),
-                WindowAction::Close => *flow = ControlFlow::Exit,
+                // The page asks or applies the user's choice, then sends hide or quit.
+                WindowAction::Close => {
+                    let _ = webview.evaluate_script("window.atrium && atrium.requestClose()");
+                }
+                // Without a tray icon there'd be no way back to a hidden window: quit instead.
+                WindowAction::Hide if tray_icon.is_none() => *flow = ControlFlow::Exit,
+                WindowAction::Hide => window.set_visible(false),
+                WindowAction::Show => {
+                    window.set_visible(true);
+                    window.set_minimized(false);
+                    window.set_focus();
+                }
+                WindowAction::Quit => *flow = ControlFlow::Exit,
                 WindowAction::Resize(edge) => {
                     let dir = match edge.as_str() {
                         "n" => ResizeDirection::North,
@@ -156,7 +207,13 @@ pub fn run() -> ! {
             Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
                 let _ = webview.evaluate_script(&format!("window.atrium && atrium.maximized({})", window.is_maximized()));
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => *flow = ControlFlow::Exit,
+            // Alt+F4 / taskbar close: same as the page's close button.
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                if window.is_visible() {
+                    window.set_focus();
+                }
+                let _ = webview.evaluate_script("window.atrium && atrium.requestClose()");
+            }
             _ => {}
         }
     })

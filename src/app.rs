@@ -22,6 +22,12 @@ pub enum WindowAction {
     Minimize,
     ToggleMaximize,
     Close,
+    /// Hide to the tray (Atrium keeps running: OVRServer, streaming, the hardware watch).
+    Hide,
+    /// Show the window again (tray icon / menu).
+    Show,
+    /// Quit Atrium for real.
+    Quit,
     /// n, s, e, w, ne, nw, se, sw
     Resize(String),
 }
@@ -95,6 +101,7 @@ impl App {
             "localGames": set.local_games.iter().map(|l| json!({ "id": l.id, "name": l.name, "exe": l.exe })).collect::<Vec<_>>(),
             "vrOnly": set.vr_only.unwrap_or(true),
             "autostart": sys::autostart::enabled(),
+            "closeAction": set.close_action.clone().unwrap_or_else(|| "ask".into()),
             "ovr": launcher::ovr_dir(),
             "modes": set.game_options.iter().map(|(k, v)| (k.clone(), json!(v.mode))).collect::<serde_json::Map<_, _>>(),
             "starts": starts,
@@ -256,6 +263,8 @@ impl App {
                 "minimize" => WindowAction::Minimize,
                 "maximize" => WindowAction::ToggleMaximize,
                 "close" => WindowAction::Close,
+                "hide" => WindowAction::Hide,
+                "quit" => WindowAction::Quit,
                 "resize" => WindowAction::Resize(arg("edge")),
                 _ => return,
             })),
@@ -341,6 +350,14 @@ impl App {
                         Err(e) => e,
                     });
                 });
+            }
+            "setCloseAction" => {
+                let v = arg("value");
+                let mut s = self.st();
+                s.settings.close_action = matches!(v.as_str(), "tray" | "quit").then_some(v);
+                s.settings.save();
+                drop(s);
+                self.push();
             }
             "setAutostart" => {
                 if !sys::autostart::set(m["on"].as_bool().unwrap_or(false)) {

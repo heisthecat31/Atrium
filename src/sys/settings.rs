@@ -15,6 +15,8 @@ pub struct Settings {
     pub steam_vr_cache: HashMap<String, Option<(bool, bool)>>,
     pub meta_name_cache: HashMap<String, Option<String>>,
     pub vr_only: Option<bool>,
+    /// What closing the window does: "tray" or "quit"; None = ask each time.
+    pub close_action: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

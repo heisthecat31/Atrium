@@ -301,6 +301,12 @@ function settings() {
     <div class="card"><div class="row">
       <div class="grow"><h4>Start Atrium when I sign in</h4><p>Atrium opens with Windows, so your headset is ready before you pick a game.</p></div>
       <span class="toggle ${S.autostart ? 'on' : ''}" id="autostart"><i></i></span>
+    </div>
+    <div class="row">
+      <div class="grow"><h4>When I close the window</h4><p>In the tray Atrium keeps your headset ready; quitting stops Meta's runtime and streaming too.</p></div>
+      <select class="input" id="closeaction" style="width:200px">
+        ${[['ask', 'Ask me'], ['tray', 'Close to tray'], ['quit', 'Quit Atrium']].map(([v, l]) => `<option value="${v}" ${S.closeAction === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
     </div></div>
   </div>`;
 }
@@ -311,7 +317,7 @@ function pageSig() {
     case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
-    case 'settings': return JSON.stringify([S.autostart]);
+    case 'settings': return JSON.stringify([S.autostart, S.closeAction]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
@@ -359,7 +365,10 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('dblclick', (e) => { const g = e.target.closest('.game'); if (g) send('launch', { id: g.dataset.game }); });
 document.addEventListener('input', (e) => { if (e.target.id === 'q') { ui.search = e.target.value; render(); } });
-document.addEventListener('change', (e) => { if (e.target.id === 'mode') send('setMode', { id: ui.selected, mode: e.target.value }); });
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'mode') send('setMode', { id: ui.selected, mode: e.target.value });
+  if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.selected) { ui.selected = null; render(); }
   if (e.key === 'Enter' && e.target.classList?.contains('game')) { ui.selected = e.target.dataset.game; render(); }
@@ -394,5 +403,36 @@ function maximized(on) {
   if (b) { b.innerHTML = on ? RESTORE : MAXIMIZE; b.title = on ? 'Restore' : 'Maximise'; }
 }
 
-window.atrium = { update(s) { S = s; render(); }, notice, maximized };
+// Closing the window: ask "Close to tray instead?", or do what the user chose in Settings.
+// In the tray Atrium keeps running (OVRServer, streaming); the tray icon brings it back.
+function requestClose() {
+  const choice = S?.closeAction || 'ask';
+  if (choice !== 'ask') { send('window', { action: choice === 'tray' ? 'hide' : 'quit' }); return; }
+  if ($('#closeask')) return;
+  const el = document.createElement('div');
+  el.id = 'closeask';
+  el.className = 'modal';
+  el.innerHTML = `<div class="scrim"></div><div class="box" role="dialog" aria-modal="true" aria-labelledby="closeask-t">
+    <h3 id="closeask-t">Close to tray instead?</h3>
+    <p>In the tray Atrium keeps your headset ready (Meta's runtime for a wired Rift, streaming for Quest and Pico). Quitting stops all of it.</p>
+    <label class="check"><input type="checkbox" id="closeask-remember"> Don't ask again (change it in Settings)</label>
+    <div class="row"><button class="btn ghost" data-close-choice="cancel">Cancel</button>
+      <button class="btn" data-close-choice="quit">Quit Atrium</button>
+      <button class="btn primary" data-close-choice="tray">Close to tray</button></div></div>`;
+  document.body.append(el);
+  el.querySelector('[data-close-choice="tray"]').focus();
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-close-choice]');
+  if (!b) { if (e.target.closest('#closeask .scrim')) $('#closeask')?.remove(); return; }
+  const choice = b.dataset.closeChoice;
+  const remember = $('#closeask-remember')?.checked;
+  $('#closeask')?.remove();
+  if (choice === 'cancel') return;
+  if (remember) send('setCloseAction', { value: choice });
+  send('window', { action: choice === 'tray' ? 'hide' : 'quit' });
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#closeask')) $('#closeask').remove(); });
+
+window.atrium = { update(s) { S = s; render(); }, notice, maximized, requestClose };
 send('ready');

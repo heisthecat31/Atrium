@@ -5,7 +5,8 @@ const RUN: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 fn command() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
-    format!("\"{}\"", exe.display())
+    // Started at sign-in: straight to the tray, no window.
+    format!("\"{}\" --tray", exe.display())
 }
 
 pub fn enabled() -> bool {

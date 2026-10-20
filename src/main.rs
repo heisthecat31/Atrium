@@ -59,6 +59,8 @@ fn main() {
                 _ => eprintln!("usage: atrium --sign-in steam|meta"),
             }
         }
-        _ => ui::run(),
+        // Started at sign-in (autostart): straight to the tray.
+        Some("--tray") => ui::run(true),
+        _ => ui::run(false),
     }
 }

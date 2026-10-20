@@ -24,6 +24,7 @@ dirs = "6"
 url = "2"
 wry = "0.53"
 tao = "0.34"
+tray-icon = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

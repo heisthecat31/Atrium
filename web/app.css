@@ -271,3 +271,13 @@ select.input { padding-right: 30px; cursor: pointer; }
 .toast { padding: 12px 18px; border-radius: 12px; background: #222838; border: 1px solid var(--line-2); box-shadow: var(--shadow); animation: toast .25s ease; max-width: 560px; }
 .toast.out { opacity: 0; transform: translateY(6px); transition: .3s; }
 @keyframes toast { from { opacity: 0; transform: translateY(10px); } }
+
+/* Close-to-tray question */
+.modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; }
+.modal .scrim { position: absolute; inset: 0; background: rgba(5,6,10,.6); backdrop-filter: blur(3px); animation: fade .15s ease; }
+.modal .box { position: relative; width: min(440px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--line-2);
+  border-radius: 14px; padding: 22px 22px 18px; box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+.modal h3 { margin: 0 0 8px; font-size: 17px; }
+.modal p { margin: 0 0 14px; color: var(--muted); line-height: 1.5; }
+.modal .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; cursor: pointer; margin-bottom: 18px; }
+.modal .row { display: flex; justify-content: flex-end; gap: 10px; }
