@@ -36,6 +36,7 @@ sudo apt install build-essential git cmake ninja-build pkg-config python3 libeig
 Edit Monado in a checkout of the pinned commit, then regenerate with `git diff` / `git format-patch`.
 
 - `0001`: report the runtime as "Atrium" in `xrGetInstanceProperties`.
+- `0002`: the system name is the headset's own ("Oculus Rift CV1"), not "Monado: ...".
 
 ## Hardware access
 

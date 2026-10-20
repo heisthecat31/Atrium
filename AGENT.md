@@ -37,6 +37,7 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `src/login.rs` | sign-in: Steam via system browser + localhost OpenID return; Meta in a native webview (wry) subprocess (`atrium --login-meta`) that catches the `oculus://` callback |
 | `runtime/` (top level, gitignored) | Meta DLLs copied earlier for research. Locked by OVRServer; never commit |
 | `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI): forwards to the backend in `runtime.json`; trace with `ATRIUM_XR_TRACE=1` -> `logs\xr.log` |
+| `native/atrium_xr_linux/` | the Atrium Runtime on Linux: Atrium's build of Monado (pinned + `patches/`), `build.sh` -> `native/out/linux/` (`libopenxr_atrium.so`, `atrium-service`, `atrium_openxr.json`). App side: `src/services/atrium_service.rs` |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
 | `native/atrium_ovr/` | Atrium OVR: CMake fetches pinned Revive/OpenXR SDK/Oculus SDK/Detours, builds `LibOVRRT64_1.dll` (static CRT + static OpenXR loader, one DLL). Log: `%APPDATA%\Atrium\logs\ovr.log` |
@@ -48,6 +49,30 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (15:00-15:30): **Atrium Runtime for Linux** (`native/atrium_xr_linux`). User chose
+  "built on Monado" (not from scratch, not a user-installed Monado) and build-only for now (no
+  Linux boot on the test PC; WSL2 can't drive the headset display).
+  - Monado main (pinned 5bca1effb, 2026-10-20) already has the CV1 end to end: `rift` (HMD,
+    Touch over the radio, Touch calibration), `rift_sensor` (sensor cameras over UVC/libusb) and
+    `tracking/constellation` (LED blob tracking, correspondence search, lambdatwist P3P, Ceres
+    pose refinement: Jan Schmidt's OpenHMD rift-kalman-filter work, ported). Needs Ceres >= 2.1.
+  - Options: runtime suffix `atrium`, socket `atrium_comp_ipc`, service ON (systemd off), no
+    SteamVR plugin/lighthouse, no OpenVR target. Patches: 0001 runtimeName "Atrium", 0002 system
+    name = headset's own. Release + strip: service 2.3 MB, runtime 1.7 MB (links system Ceres,
+    OpenCV, libusb, hidapi: packaging must bring them).
+  - Smoke test in WSL (Ubuntu 26.04): service up, a Khronos-loader app gets "Atrium
+    'v25.1.0-939-g5bca1effb'" and a system (simulated HMD via `SIMULATED_ENABLE=1`,
+    `XRT_COMPOSITOR_NULL=1`). The app's Linux code passes `cargo check` in WSL.
+  - Traps: (1) WSL PATH has /mnt/c folders; CMake's package search crawls them for minutes per
+    lookup (build.sh strips them). (2) The service won't start with stdin on /dev/null (epoll on
+    stdin); the app gives it a pipe. (3) WSL stops its VM when no wsl.exe is attached: run long
+    builds from a detached Windows `wsl.exe`, not `setsid` inside WSL. (4) Don't edit build.sh
+    while it runs (bash reads scripts as it goes).
+  - RiftLift (MIT) on Linux is game-side only (Revive-derived bridges under GE-Proton crossing to
+    the host runtime via Wine unixlib, a Platform SDK shim, xrizer); it "doesn't install headset
+    drivers or VR runtimes". Atrium copies that approach in its own code for the game side.
+  - Next: Linux game side (Atrium OVR under Proton reaching the host Atrium Runtime; signed-shim
+    games have no Meta DLL to load on Linux), udev rules for the Rift, packaging.
 - 2026-10-20 (later): `src/login.rs` written. Meta: parent runs `begin_login`, spawns
   `atrium --login-meta`, sends the auth URL on **stdin**; child (tao + wry, incognito, WebView2
   data in `%APPDATA%\Atrium\webview`) blocks the `oculus://`/`oculus-client://` navigation and

@@ -44,13 +44,14 @@ for p in "$HERE"/patches/*.patch; do
 done
 
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
     -DXRT_OXR_RUNTIME_SUFFIX=atrium \
     -DXRT_IPC_MSG_SOCK_FILENAME=atrium_comp_ipc \
     -DXRT_FEATURE_SERVICE=ON \
     -DXRT_FEATURE_SERVICE_SYSTEMD=OFF \
     -DXRT_FEATURE_STEAMVR_PLUGIN=OFF \
+    -DXRT_FEATURE_OPENVR=OFF \
     -DXRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE=OFF \
     -DXRT_MODULE_CONSTELLATION_TRACKING=ON \
     -DXRT_BUILD_DRIVER_RIFT=ON \
@@ -61,6 +62,7 @@ cmake --build "$BUILD"
 # Stage: the runtime, the service under Atrium's name, and a manifest next to them.
 cp -f "$BUILD/src/xrt/targets/openxr/libopenxr_atrium.so" "$OUT/"
 cp -f "$BUILD/src/xrt/targets/service/monado-service" "$OUT/atrium-service"
+strip --strip-unneeded "$OUT/libopenxr_atrium.so" "$OUT/atrium-service"
 cat > "$OUT/atrium_openxr.json" <<'JSON'
 {
     "file_format_version": "1.0.0",

@@ -1,0 +1,14 @@
+Atrium: the system name is the headset's own ("Oculus Rift CV1"), not "Monado: ...".
+
+diff --git a/src/xrt/base/b_system.c b/src/xrt/base/b_system.c
+index c24dc521c..bb81ea784 100644
+--- a/src/xrt/base/b_system.c
++++ b/src/xrt/base/b_system.c
+@@ -266,6 +266,6 @@ b_system_fill_properties(struct b_system *bsys, const char *name)
+ {
+ 	bsys->base.properties.vendor_id = 42;
+ 	// The magical 247 number, is to silence warnings.
+-	snprintf(bsys->base.properties.name, XRT_MAX_SYSTEM_NAME_SIZE, "Monado: %.*s", 247, name);
++	snprintf(bsys->base.properties.name, XRT_MAX_SYSTEM_NAME_SIZE, "%.*s", 255, name);
+ 	bsys->base.properties.form_factor = XRT_FORM_FACTOR_HMD;
+ }
