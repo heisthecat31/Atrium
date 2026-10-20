@@ -1,0 +1,62 @@
+Atrium: the Atrium streaming output in the compositor: atrium_stream_target.c (render -> NV12 ->
+Vulkan Video H.264 -> ALVR server_core) built into comp_main with the Atrium stream driver, and its
+factory first in the target list (detected only with ATRIUM_STREAM=1).
+
+diff --git a/src/xrt/compositor/main/CMakeLists.txt b/src/xrt/compositor/main/CMakeLists.txt
+index cc7d3b52b..dce613bc5 100644
+--- a/src/xrt/compositor/main/CMakeLists.txt
++++ b/src/xrt/compositor/main/CMakeLists.txt
+@@ -56,6 +56,15 @@ endif()
+ if(WIN32)
+ 	target_sources(comp_main PRIVATE comp_window_mswin.c)
+ endif()
++if(XRT_BUILD_DRIVER_ATRIUM_STREAM)
++	# Atrium: the streaming output (encode to the headset app), with the Atrium stream driver.
++	target_sources(
++		comp_main
++		PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/drivers/atrium_stream/atrium_stream_target.c
++			${PROJECT_SOURCE_DIR}/src/xrt/drivers/atrium_stream/atrium_stream_encoder.c
++		)
++	target_link_libraries(comp_main PRIVATE drv_atrium_stream)
++endif()
+ if(VK_USE_PLATFORM_DISPLAY_KHR)
+ 	target_sources(comp_main PRIVATE comp_window_vk_display.c)
+ endif()
+diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
+index a8fbd01d8..a206c93b9 100644
+--- a/src/xrt/compositor/main/comp_compositor.c
++++ b/src/xrt/compositor/main/comp_compositor.c
+@@ -814,6 +814,9 @@ compositor_init_vulkan(struct comp_compositor *c)
+  */
+ 
+ const struct comp_target_factory *ctfs[] = {
++#ifdef XRT_BUILD_DRIVER_ATRIUM_STREAM
++    &comp_target_factory_atrium_stream,
++#endif
+ #if defined VK_USE_PLATFORM_WAYLAND_KHR && defined XRT_HAVE_WAYLAND_DIRECT
+     &comp_target_factory_direct_wayland,
+ #endif
+diff --git a/src/xrt/compositor/main/comp_window.h b/src/xrt/compositor/main/comp_window.h
+index eb41c3c36..f325b5a3a 100644
+--- a/src/xrt/compositor/main/comp_window.h
++++ b/src/xrt/compositor/main/comp_window.h
+@@ -15,6 +15,7 @@
+ #include "main/comp_compositor.h"
+ 
+ #include "xrt/xrt_config_os.h"
++#include "xrt/xrt_config_drivers.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -34,6 +35,11 @@ extern "C" {
+  */
+ extern const struct comp_target_factory comp_target_factory_debug_image;
+ 
++#ifdef XRT_BUILD_DRIVER_ATRIUM_STREAM
++//! Atrium: encode and stream to a standalone headset (only detected with ATRIUM_STREAM=1).
++extern const struct comp_target_factory comp_target_factory_atrium_stream;
++#endif
++
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+ 
+ /*!

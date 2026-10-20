@@ -1,0 +1,42 @@
+// Copyright 2026, Atrium contributors.
+// SPDX-License-Identifier: MIT
+//
+// Atrium streaming: the compositor's RGBA frame (gamma-encoded, read raw through the UNORM view)
+// to NV12 planes: Y at full size, interleaved CbCr at half size. BT.709, limited range, matching
+// the VUI the encoder writes. One invocation per 2x2 block.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D src;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D dst_y;
+layout(set = 0, binding = 2, rg8) uniform writeonly image2D dst_uv;
+
+float luma(vec3 c)
+{
+	return 16.0 / 255.0 + dot(c, vec3(0.1826, 0.6142, 0.0620));
+}
+
+void main()
+{
+	ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 uv_size = imageSize(dst_uv);
+	if (block.x >= uv_size.x || block.y >= uv_size.y) {
+		return;
+	}
+	ivec2 src_size = imageSize(src);
+	vec3 sum = vec3(0.0);
+	for (int dy = 0; dy < 2; dy++) {
+		for (int dx = 0; dx < 2; dx++) {
+			ivec2 p = block * 2 + ivec2(dx, dy);
+			// The coded picture may be a little larger than the frame: repeat the edge.
+			vec3 c = imageLoad(src, min(p, src_size - 1)).rgb;
+			imageStore(dst_y, p, vec4(luma(c)));
+			sum += c;
+		}
+	}
+	vec3 c = sum * 0.25;
+	float cb = 128.0 / 255.0 + dot(c, vec3(-0.1006, -0.3386, 0.4392));
+	float cr = 128.0 / 255.0 + dot(c, vec3(0.4392, -0.3989, -0.0403));
+	imageStore(dst_uv, block, vec4(cb, cr, 0.0, 0.0));
+}
