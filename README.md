@@ -7,7 +7,8 @@ One open-source home for every VR headset and every VR game.
 - **One runtime.** The Atrium Runtime is an OpenXR runtime and the only one Atrium exposes.
   Under the hood it forwards to the vendor stack that drives the connected headset (Meta, SteamVR,
   Monado/WiVRn), then replaces those with Atrium's own drivers headset by headset.
-  LibOVR (Oculus SDK) and OpenVR games are translated into OpenXR.
+  Oculus SDK games are translated into OpenXR by Atrium OVR, Atrium's own layer (built on
+  Revive's OpenXR backend); OpenVR games will be next.
 - **One library.** Steam, Meta and local games together. Sign in to Steam and Meta to see what
   you own; installed games show without signing in.
 - **One dashboard.** An in-VR dashboard (Unity, in [`Dashboard/`](Dashboard/)) shared by every
@@ -26,6 +27,7 @@ Steam/Meta sign-in. The Atrium Runtime itself is in progress.
 | `src/services/` | headsets, runtime, Steam, Meta, library |
 | `src/login.rs` | Steam (OpenID) and Meta (native SSO) sign-in |
 | `native/` | C++ tools and the Atrium Runtime (MSVC) |
+| `native/atrium_ovr/` | Atrium OVR, the Oculus SDK → OpenXR translation layer (CMake) |
 | `Dashboard/` | the in-VR dashboard (Unity) |
 | `assets/` | icon and headset line art |
 
@@ -37,14 +39,21 @@ App:
 cargo build --release
 ```
 
-Native tools (Windows, Visual Studio with C++):
+Native parts (Windows, Visual Studio with C++, CMake):
 
 ```
 native\build.bat
 ```
 
-`native/third_party/LibOVR` is Meta's Oculus PC SDK (`Include/` and `Shim/`). It isn't in this
-repo for licence reasons; download the Oculus PC SDK from Meta and copy those two folders there.
+The first run downloads Atrium OVR's pinned sources (Revive, the OpenXR SDK, the Oculus SDK
+headers, Detours) and builds `native\out\ovr\LibOVRRT64_1.dll`. Nothing of Meta's is committed or
+shipped; the Oculus SDK headers are only used to compile.
+
+Any Oculus SDK program can be run through Atrium OVR from a terminal:
+
+```
+atrium --translate path\to\game.exe
+```
 
 Sign-ins can also be run from a terminal (debugging):
 

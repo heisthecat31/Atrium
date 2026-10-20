@@ -16,8 +16,10 @@ Notes for any agent (or person) picking up this project. Read this first.
     drives the connected hardware (Meta's runtime for Rift/Quest Link, SteamVR for Lighthouse,
     Monado/WiVRn on Linux), while the game only ever sees "Atrium". Later versions replace
     vendor stacks with Atrium's own drivers, headset by headset (Rift CV1 first: test hardware).
-  - Games that aren't OpenXR are translated into it: LibOVR (Oculus SDK) games through the
-    Revive-derived layer (RiftLift / EchoXR, MIT), OpenVR games through xrizer / OpenComposite.
+  - Games that aren't OpenXR are translated into it. Oculus SDK games: **Atrium OVR**
+    (`native/atrium_ovr`), Atrium's own layer: ReviveXR (Revive, MIT, pinned upstream ab73167)
+    + Atrium's entry point. Not RiftLift (GPL, and the user wants our own). OpenVR games: TBD
+    (xrizer / OpenComposite are the references).
 - **One library**: Steam, Meta and local games together. The user still signs in to Steam and
   Meta to see what they own; installed games show without signing in.
 - Licence: MIT. Ship **no** Meta or Valve binaries, artwork or game files.
@@ -37,7 +39,9 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `native/atrium_xr/` | the Atrium Runtime (C++, OpenXR runtime ABI) |
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
-| `native/third_party/LibOVR` | Meta Oculus SDK headers/shim: gitignored (not MIT) |
+| `native/atrium_ovr/` | Atrium OVR: CMake fetches pinned Revive/OpenXR SDK/Oculus SDK/Detours, builds `LibOVRRT64_1.dll` (static CRT + static OpenXR loader, one DLL). Log: `%APPDATA%\Atrium\logs\ovr.log` |
+| `src/sys/inject.rs` | starts a game suspended with Atrium OVR loaded (remote LoadLibraryW), sets `LIBOVR_DLL_DIR` + `XR_RUNTIME_JSON` |
+| `native/third_party/LibOVR` | optional local Oculus SDK copy, gitignored; build.bat falls back to the fetched one |
 | `assets/` | Atrium icon |
 
 Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamFrameSim, runtime).
@@ -56,6 +60,17 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   Open: art for owned-but-not-installed Meta games (graph.oculus.com has `cover_square_image`
   fields but they came back empty; store pages render images client-side). The Steam sign-in
   printed success but its save didn't land once; `Settings::save` now logs failures.
+- 2026-10-20 (later): Atrium OVR. Key finding: the Oculus SDK 1.x shim in newer games only
+  loads a **Meta-signed** LibOVRRT64_1.dll (WinVerifyTrust + cert names), so LIBOVR_DLL_DIR
+  alone only works for old games (Echo). Atrium injects Atrium OVR first; the shim then
+  sign-checks Meta's real DLL (found via PATH: Meta's oculus-runtime folder) and LoadLibraryW's
+  it, which Atrium OVR's hook answers with itself. So for now **Meta's runtime must be
+  installed** for signed-shim games; never put Atrium OVR's folder first on PATH (the shim would
+  find the unsigned copy and stop). Verified with `atrium --translate native\out\ovrprobe.exe
+  json`: Revive's HMD desc + the emulated HMD's 2880x1600 over Meta's OpenXR runtime.
+  `XR_RUNTIME_JSON` = Atrium Runtime manifest when built, else the backend Atrium chose.
+  Open: no-Meta-installed case (hook WinVerifyTrust + cert helpers, or ship a stand-in);
+  port EchoXR's generic Revive fixes; LibOVRPlatform stand-in for games that need entitlement.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic

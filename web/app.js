@@ -147,13 +147,13 @@ function libraryBody() {
 function renderDrawer() {
   const d = $('#drawer');
   const g = ui.selected && S?.games.find((x) => x.id === ui.selected);
-  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.translator]) : null;
+  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.ovr]) : null;
   if (sig === drawn.drawer) return;
   drawn.drawer = sig;
   if (!g) { d.hidden = true; d.innerHTML = ''; return; }
   const modes = [['auto', 'Automatic']];
   if (g.source === 'steam') modes.push(['steam', 'Through Steam']);
-  if (g.exe) { modes.push(['direct', 'Directly']); if (S.translator) modes.push(['translate', 'Translated to OpenXR']); }
+  if (g.exe) { modes.push(['direct', 'Directly']); if (S.ovr) modes.push(['translate', 'Through Atrium OVR (OpenXR)']); }
   const mode = S.modes[g.id] || 'auto';
   const heroUrl = art(g.art.hero || g.art.wide || g.art.cover);
   const vr = g.vr_only ? 'VR only' : g.vr ? 'Supports VR' : g.vr_known ? 'No' : 'Unknown';
@@ -240,6 +240,13 @@ function runtime() {
     </div>
     <h2>Headset driven through</h2>
     <div class="card">${rt.chosen ? `<h4>${esc(rt.chosen.label)}</h4><p>${esc(rt.reason)}</p>` : '<h4>Nothing found</h4><p>Install Meta Horizon Link, SteamVR, or on Linux Monado / WiVRn.</p>'}</div>
+    <h2>Oculus SDK games</h2>
+    <div class="card"><div class="row">
+      <div class="status grow"><div class="ring ${S.ovr ? 'good' : 'bad'}">${icon.runtimes}</div>
+        <div><div class="big">Atrium OVR ${S.ovr ? 'ready' : 'not built'}</div>
+        <p>${S.ovr ? 'Games made for the Oculus SDK run on OpenXR through Atrium\'s own translation layer.' : 'Build it with native\\build.bat (native/atrium_ovr).'}</p>
+        ${S.ovr ? `<p class="mono">${esc(S.ovr)}</p>` : ''}</div></div>
+    </div></div>
     ${rt.backends.length ? `<h2>Available</h2><div class="card list">${rt.backends.map((b) => `<div class="item"><i class="dot ${rt.chosen && rt.chosen.manifest === b.manifest ? 'on' : ''}"></i>${esc(b.label)}<span class="sub mono">${esc(b.manifest)}</span></div>`).join('')}</div>` : ''}
   </div>`;
 }
@@ -276,12 +283,6 @@ function accounts() {
       ${S.localGames.length ? `<div class="list">${S.localGames.map((l) => `<div class="item">${esc(l.name)}<span class="sub mono">${esc(l.exe)}</span></div>`).join('')}</div>` : '<p>Any VR game that isn\'t from Steam or Meta: pick its .exe.</p>'}
       <div class="row" style="margin-top:14px"><button class="btn" data-cmd="addGame">${icon.plus}Add a game</button></div>
     </div>
-    <h2>Translation layer</h2>
-    <div class="card"><div class="row">
-      <div class="grow"><h4>Oculus SDK → OpenXR</h4><p>${S.translator ? `<span class="mono">${esc(S.translator)}</span>` : 'RiftLift-compatible launcher not found.'}</p></div>
-      ${S.translator ? '<span class="pill good">Found</span>' : ''}
-      <button class="btn" data-cmd="chooseTranslation">${icon.folder}Choose folder</button>
-    </div></div>
   </div>`;
 }
 
@@ -290,8 +291,8 @@ function pageSig() {
   switch (ui.page) {
     case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
-    case 'runtime': return JSON.stringify(S.rt);
-    default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.translator, S.busy.signingIn]);
+    case 'runtime': return JSON.stringify([S.rt, S.ovr]);
+    default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
 

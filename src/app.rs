@@ -64,7 +64,7 @@ impl App {
     fn snapshot(&self) -> Value {
         let s = self.st();
         let set = &s.settings;
-        let starts: serde_json::Map<String, Value> = s.games.iter().filter(|g| g.installed).map(|g| (g.id.clone(), json!(launcher::mode(g, set).label()))).collect();
+        let starts: serde_json::Map<String, Value> = s.games.iter().filter(|g| g.installed).map(|g| (g.id.clone(), json!(launcher::mode(g, set, s.rt.as_ref()).label()))).collect();
         json!({
             "games": s.games,
             "hw": s.hw,
@@ -75,7 +75,7 @@ impl App {
             "meta": set.meta_accounts.iter().map(|a| json!({ "id": a.id, "name": a.name, "valid": sys::secret::unseal(&a.token).is_some() })).collect::<Vec<_>>(),
             "localGames": set.local_games.iter().map(|l| json!({ "id": l.id, "name": l.name, "exe": l.exe })).collect::<Vec<_>>(),
             "vrOnly": set.vr_only.unwrap_or(true),
-            "translator": launcher::translator(set),
+            "ovr": launcher::ovr_dir(),
             "modes": set.game_options.iter().map(|(k, v)| (k.clone(), json!(v.mode))).collect::<serde_json::Map<_, _>>(),
             "starts": starts,
             "errors": s.owned.errors,
@@ -211,8 +211,9 @@ impl App {
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };
                 let r = {
-                    let mut s = self.st();
-                    launcher::launch(&g, &mut s.settings)
+                    let mut guard = self.st();
+                    let s = &mut *guard;
+                    launcher::launch(&g, &mut s.settings, s.rt.as_ref())
                 };
                 match r {
                     Ok(()) => {
@@ -296,15 +297,6 @@ impl App {
                 drop(s);
                 self.rescan();
             }
-            "chooseTranslation" => self.spawn(|app| {
-                let Some(d) = rfd::FileDialog::new().set_title("Folder with RiftLiftLauncher.exe").pick_folder() else { return };
-                {
-                    let mut s = app.st();
-                    s.settings.translation_dir = Some(d.to_string_lossy().into_owned());
-                    s.settings.save();
-                }
-                app.push();
-            }),
             "openFolder" => {
                 if let Some(d) = self.game(&arg("id")).and_then(|g| g.install_dir).filter(|d| d.exists()) {
                     let _ = open::that(d);

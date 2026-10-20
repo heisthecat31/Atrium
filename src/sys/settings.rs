@@ -14,7 +14,6 @@ pub struct Settings {
     pub plays: HashMap<String, u64>,
     pub steam_vr_cache: HashMap<String, Option<(bool, bool)>>,
     pub meta_name_cache: HashMap<String, Option<String>>,
-    pub translation_dir: Option<String>,
     pub vr_only: Option<bool>,
 }
 

@@ -10,6 +10,23 @@ fn main() {
     match args.get(1).map(String::as_str) {
         // Meta sign-in window (child process, see login.rs).
         Some("--login-meta") => login::meta_window(),
+        // Run any Oculus SDK program through Atrium OVR: atrium --translate <exe> [args...]
+        Some("--translate") => {
+            let Some(exe) = args.get(2).map(std::path::PathBuf::from) else {
+                eprintln!("usage: atrium --translate <exe> [args...]");
+                std::process::exit(2)
+            };
+            let hw = services::headsets::detect();
+            let st = services::runtime::state(&hw);
+            let xr = services::runtime::manifest().or(st.chosen.map(|b| b.manifest));
+            match services::launcher::translated(&exe, &args[3..], xr.as_deref()) {
+                Ok(pid) => println!("started {} (pid {pid}) on {}", exe.display(), xr.map(|p| p.display().to_string()).unwrap_or("the active OpenXR runtime".into())),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1)
+                }
+            }
+        }
         // Run a sign-in from a terminal and save it (debugging without the UI).
         Some("--sign-in") => {
             let cancel = std::sync::atomic::AtomicBool::new(false);

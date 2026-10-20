@@ -4,6 +4,8 @@ pub mod secret;
 pub mod settings;
 pub mod vdf;
 #[cfg(windows)]
+pub mod inject;
+#[cfg(windows)]
 pub mod reg;
 
 use std::path::{Path, PathBuf};

@@ -16,3 +16,5 @@
 *.swp
 Thumbs.db
 .DS_Store
+/native/atrium_ovr/build/
+/native/atrium_ovr/*.log

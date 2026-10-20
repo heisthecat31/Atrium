@@ -15,7 +15,18 @@ if not defined VSCMD_ARG_TGT_ARCH call "%VARS_BAT%" >nul
 cd /d "%~dp0"
 if not exist out mkdir out
 if not exist obj mkdir obj
+rem Atrium OVR (atrium_ovr\): the translation layer for Oculus SDK games. CMake fetches its pinned
+rem sources (Revive, OpenXR SDK, Oculus SDK headers) on the first run.
+cmake -S atrium_ovr -B atrium_ovr\build -A x64 >nul
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+cmake --build atrium_ovr\build --config Release --target atrium_ovr --parallel
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+if not exist out\ovr mkdir out\ovr
+copy /y atrium_ovr\build\out\ovr\LibOVRRT64_1.dll out\ovr\ >nul
+
+rem Oculus SDK headers: a local copy in third_party\LibOVR, else the one CMake fetched above.
 set "OVR=third_party\LibOVR"
+if not exist "%OVR%\Include\OVR_CAPI.h" set "OVR=atrium_ovr\build\_deps\ovr_sdk-src\LibOVR"
 
 rem ovrprobe: a plain LibOVR app, to see the headset the way games do
 cl.exe /nologo /MT /O2 /EHsc /W3 /I%OVR%\Include /Foobj\ /Fe"out\ovrprobe.exe" src\ovrprobe.cpp %OVR%\Shim\OVR_CAPIShim.c

@@ -1,12 +1,13 @@
-//! Starting games. Steam games go through Steam (overlay, cloud saves, DRM); Meta and local games
-//! start directly from their folder, or through the translation layer (Oculus SDK → OpenXR) when
-//! the game's mode says so.
+//! Starting games. Steam games go through Steam (overlay, cloud saves, DRM). Meta and local games
+//! start from their folder: directly, or through Atrium OVR, Atrium's translation layer for
+//! Oculus SDK games (native/atrium_ovr), which answers their LibOVR calls over OpenXR.
 use crate::services::library::{Game, Source};
+use crate::services::runtime::{self, RuntimeState};
 use crate::sys::{self, settings::Settings};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// How a game will start, resolved from its options ("auto" picks per source).
+/// How a game will start, resolved from its options ("auto" picks per game).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Steam,
@@ -19,25 +20,76 @@ impl Mode {
         match self {
             Mode::Steam => "Through Steam",
             Mode::Direct => "Directly",
-            Mode::Translate => "Translated to OpenXR",
+            Mode::Translate => "Through Atrium OVR (OpenXR)",
         }
     }
 }
 
-/// The translation launcher (RiftLift-compatible), from settings or next to atrium.
-pub fn translator(settings: &Settings) -> Option<PathBuf> {
-    let name = "RiftLiftLauncher.exe";
-    settings.translation_dir.as_ref().map(|d| Path::new(d).join(name)).filter(|p| p.exists()).or_else(|| sys::native_tool(name))
+/// Atrium OVR's folder (the one holding LibOVRRT64_1.dll): next to atrium, native/out/ovr, or
+/// the CMake build output in a source checkout.
+pub fn ovr_dir() -> Option<PathBuf> {
+    const DLL: &str = "LibOVRRT64_1.dll";
+    sys::native_tool(&format!("ovr/{DLL}"))
+        .or_else(|| {
+            let mut d = sys::exe_dir();
+            for _ in 0..4 {
+                let p = d.join("native/atrium_ovr/build/out/ovr").join(DLL);
+                if p.exists() {
+                    return Some(p);
+                }
+                if !d.pop() {
+                    break;
+                }
+            }
+            None
+        })
+        .and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
-pub fn mode(game: &Game, settings: &Settings) -> Mode {
+/// The OpenXR runtime a translated game should use: the Atrium Runtime when it's built, until
+/// then the vendor backend Atrium picked for the connected headset.
+fn xr_runtime(rt: Option<&RuntimeState>) -> Option<PathBuf> {
+    runtime::manifest().or_else(|| rt.and_then(|r| r.chosen.as_ref()).map(|b| b.manifest.clone()))
+}
+
+pub fn mode(game: &Game, settings: &Settings, rt: Option<&RuntimeState>) -> Mode {
     let chosen = settings.game_options.get(&game.id).map(|o| o.mode.as_str()).unwrap_or("auto");
+    let can_translate = game.exe.is_some() && ovr_dir().is_some();
+    let meta_drives = rt.and_then(|r| r.chosen.as_ref()).is_some_and(|b| b.id == "meta");
     match (chosen, game.source) {
         ("steam", Source::Steam) => Mode::Steam,
         ("direct", _) if game.exe.is_some() => Mode::Direct,
-        ("translate", _) if game.exe.is_some() && translator(settings).is_some() => Mode::Translate,
+        ("translate", _) if can_translate => Mode::Translate,
         (_, Source::Steam) => Mode::Steam,
+        // Oculus SDK games: Meta's own runtime when it drives the headset, Atrium OVR otherwise.
+        _ if game.vr_api == Some("oculus") && can_translate && !meta_drives => Mode::Translate,
         _ => Mode::Direct,
+    }
+}
+
+/// Start an Oculus SDK program through Atrium OVR, on the OpenXR runtime `xr` (None = the
+/// system's active one).
+///
+/// Newer Oculus SDK games only load a Meta-signed LibOVRRT64_1.dll, so Atrium OVR is injected
+/// before the game starts; when the game then loads Meta's signed runtime, Atrium OVR's
+/// LoadLibrary hook returns itself. Older games (no signature check) also find it through
+/// LIBOVR_DLL_DIR. Its folder must not go first on PATH: the SDK's loader would find the
+/// unsigned copy there and stop looking.
+pub fn translated(exe: &Path, args: &[String], xr: Option<&Path>) -> Result<u32, String> {
+    let ovr = ovr_dir().ok_or("Atrium OVR isn't built (native\\build.bat)")?;
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut env: Vec<(&str, &std::ffi::OsStr)> = vec![("LIBOVR_DLL_DIR", ovr.as_os_str())];
+    if let Some(m) = xr {
+        env.push(("XR_RUNTIME_JSON", m.as_os_str()));
+    }
+    #[cfg(windows)]
+    {
+        sys::inject::spawn_with_dll(exe, args, &dir, &env, &ovr.join("LibOVRRT64_1.dll"))
+    }
+    #[cfg(not(windows))]
+    {
+        // Linux: Windows games run under Proton, which passes the environment through.
+        Command::new(exe).args(args).current_dir(dir).envs(env).spawn().map(|c| c.id()).map_err(|e| e.to_string())
     }
 }
 
@@ -50,7 +102,7 @@ pub fn get_url(game: &Game) -> String {
     }
 }
 
-pub fn launch(game: &Game, settings: &mut Settings) -> Result<(), String> {
+pub fn launch(game: &Game, settings: &mut Settings, rt: Option<&RuntimeState>) -> Result<(), String> {
     if !game.installed {
         let url = get_url(game);
         if url.is_empty() {
@@ -58,7 +110,8 @@ pub fn launch(game: &Game, settings: &mut Settings) -> Result<(), String> {
         }
         return open::that(url).map_err(|e| e.to_string());
     }
-    match mode(game, settings) {
+    let mode = mode(game, settings, rt);
+    match mode {
         Mode::Steam => open::that(format!("steam://rungameid/{}", game.app_id)).map_err(|e| format!("Couldn't start Steam: {e}"))?,
         Mode::Direct => {
             let exe = game.exe.as_ref().ok_or("No executable known for this game")?;
@@ -67,24 +120,12 @@ pub fn launch(game: &Game, settings: &mut Settings) -> Result<(), String> {
         }
         Mode::Translate => {
             let exe = game.exe.as_ref().ok_or("No executable known for this game")?;
-            let tr = translator(settings).ok_or("The translation layer isn't installed")?;
-            let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-            let key = if game.canonical.is_empty() { game.app_id.clone() } else { game.canonical.clone() };
-            Command::new(&tr)
-                .arg("/openxr")
-                .args(["/app", &key])
-                .arg("/cwd")
-                .arg(&dir)
-                .arg(exe)
-                .args(split_args(&game.args))
-                .current_dir(tr.parent().unwrap_or(Path::new(".")))
-                .spawn()
-                .map_err(|e| format!("Couldn't start the translation layer: {e}"))?;
+            translated(exe, &split_args(&game.args), xr_runtime(rt).as_deref())?;
         }
     }
     settings.plays.insert(game.id.clone(), sys::now_ms());
     settings.save();
-    sys::log(&format!("launch {} ({:?})", game.id, mode(game, settings)));
+    sys::log(&format!("launch {} ({mode:?})", game.id));
     Ok(())
 }
 
