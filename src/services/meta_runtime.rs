@@ -23,20 +23,67 @@ pub fn running() -> bool {
     sys::processes().contains("ovrserver_x64.exe")
 }
 
-/// Close Meta's extras that are running. Returns the ones closed.
+/// Close Meta's extras that are running, if OVRServer is. Returns the ones closed.
+#[cfg(windows)]
 pub fn strip() -> Vec<&'static str> {
-    let procs = sys::processes();
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    let mut found: Vec<(u32, &'static str)> = vec![];
+    let mut server = false;
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return vec![];
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name = String::from_utf16_lossy(&e.szExeFile[..len]).to_lowercase();
+            if name == "ovrserver_x64.exe" {
+                server = true;
+            } else if let Some(&x) = EXTRAS.iter().find(|&&x| x == name) {
+                found.push((e.th32ProcessID, x));
+            }
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
     let mut closed = vec![];
-    for &name in EXTRAS {
-        if procs.contains(name) {
-            sys::output("taskkill.exe", &["/f", "/t", "/im", name]);
-            closed.push(name);
+    if !server {
+        return closed;
+    }
+    for (pid, name) in found {
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !h.is_null() {
+                if TerminateProcess(h, 1) != 0 && !closed.contains(&name) {
+                    closed.push(name);
+                }
+                CloseHandle(h);
+            }
         }
     }
     if !closed.is_empty() {
         sys::log(&format!("meta runtime: closed {}", closed.join(", ")));
     }
     closed
+}
+
+#[cfg(not(windows))]
+pub fn strip() -> Vec<&'static str> {
+    vec![]
+}
+
+/// Meta's runtime relaunches its app each time a VR game connects; close it as soon as it
+/// appears (a snapshot of the process list costs well under a millisecond).
+pub fn watch() {
+    std::thread::spawn(|| loop {
+        strip();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    });
 }
 
 /// Dash is off and the service is running: nothing needs admin.

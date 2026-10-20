@@ -48,6 +48,7 @@ impl App {
     pub fn new(proxy: tao::event_loop::EventLoopProxy<UiEvent>) -> Arc<App> {
         let app = Arc::new(App { state: Mutex::new(State { settings: Settings::load(), ..Default::default() }), proxy: Mutex::new(proxy) });
         app.watch_hardware();
+        meta_runtime::watch();
         app.rescan();
         app.refresh_owned();
         app
@@ -108,10 +109,6 @@ impl App {
             let hw = headsets::detect();
             let st = rt::state(&hw);
             rt::write_backend(&st);
-            // Atrium keeps only OVRServer of Meta's runtime; its app, Dash and the rest go.
-            if meta_runtime::running() {
-                meta_runtime::strip();
-            }
             {
                 let mut s = app.st();
                 s.hw = Some(hw);
