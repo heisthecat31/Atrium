@@ -1,0 +1,16 @@
+Atrium: XrHMD.cpp uses std::chrono and std::this_thread without including their headers;
+newer MSVC (VS 2026) no longer pulls them in transitively.
+
+diff --git a/DrvOpenXR/XrHMD.cpp b/DrvOpenXR/XrHMD.cpp
+index ffeab79..ec940f2 100644
+--- a/DrvOpenXR/XrHMD.cpp
++++ b/DrvOpenXR/XrHMD.cpp
+@@ -11,6 +11,8 @@
+ #include "generated/static_bases.gen.h"
+ #include <thread>
+ #include <mutex>
++#include <chrono>
++#include <thread>
+ 
+ void XrHMD::GetRecommendedRenderTargetSize(uint32_t* width, uint32_t* height)
+ {
