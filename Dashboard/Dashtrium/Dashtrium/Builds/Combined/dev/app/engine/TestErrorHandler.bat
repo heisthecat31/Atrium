@@ -1,0 +1,1 @@
+start ErrorHandler.exe 0 "This is an error! It has been caught for you." "Error Test"
