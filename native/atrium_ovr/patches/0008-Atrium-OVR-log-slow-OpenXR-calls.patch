@@ -1,0 +1,27 @@
+Atrium OVR: log OpenXR calls that take 50 ms or more (CHK_XR), with the call and source line,
+to find stalls inside the runtime.
+
+diff --git a/ReviveXR/Common.h b/ReviveXR/Common.h
+index 7b7c0d9..5400ac4 100644
+--- a/ReviveXR/Common.h
++++ b/ReviveXR/Common.h
+@@ -32,6 +32,9 @@ void AtriumOvrLog(const char* fmt, ...);
+ void AtriumOvrLogFail(const char* call, int result, const char* file, int line);
+ // At most once a second per call site, for per-frame traces.
+ bool AtriumOvrEverySecond(long long* last);
++// Calls that block (>= 50 ms) are logged with their source line: finds stalls in the runtime.
++unsigned long long AtriumOvrNowMs();
++void AtriumOvrLogSlow(const char* call, unsigned long long ms, const char* file, int line);
+ 
+ #ifdef NDEBUG
+ #define assertmsg(expression, message) ((void)0)
+@@ -44,7 +47,9 @@ bool AtriumOvrEverySecond(long long* last);
+ 
+ #define CHK_XR(x) \
+ 	{ \
++		unsigned long long __atrium_t0 = AtriumOvrNowMs(); \
+ 		g_LastResult = (x); \
++		AtriumOvrLogSlow(#x, AtriumOvrNowMs() - __atrium_t0, __FILE__, __LINE__); \
+ 		assertmsg(XR_SUCCEEDED(g_LastResult), ResultToString(g_LastResult)); \
+ 		if (XR_FAILED(g_LastResult)) { AtriumOvrLogFail(#x, (int)g_LastResult, __FILE__, __LINE__); return ResultToOvrResult(g_LastResult); } \
+ 	}

@@ -57,6 +57,19 @@ void AtriumOvrLogFail(const char* call, int result, const char* file, int line)
 	AtriumOvrLog("FAILED %d at %s:%d  %s", result, base ? base + 1 : file, line, call);
 }
 
+unsigned long long AtriumOvrNowMs()
+{
+	return GetTickCount64();
+}
+
+// Patch 0008: OpenXR calls that block for 50 ms or more, with where they were made.
+void AtriumOvrLogSlow(const char* call, unsigned long long ms, const char* file, int line)
+{
+	if (ms < 50) return;
+	const char* base = strrchr(file, '\\');
+	AtriumOvrLog("SLOW %llu ms at %s:%d  %s", ms, base ? base + 1 : file, line, call);
+}
+
 bool AtriumOvrEverySecond(long long* last)
 {
 	long long now = (long long)GetTickCount64();
