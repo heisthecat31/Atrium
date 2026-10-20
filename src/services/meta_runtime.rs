@@ -1,5 +1,6 @@
 //! Meta's runtime, cut down to the part Atrium uses: OVRServer, which drives the Rift and puts
-//! frames on its panel (NVIDIA only hands the panel to Meta's direct mode). Everything else Meta
+//! frames on its panel (NVIDIA only hands the panel to Meta's direct mode). Atrium starts it
+//! itself; Meta's service (OVR Service Launcher, OVR Redir) isn't needed. Everything else Meta
 //! starts with it is closed: the Meta Horizon Link app, Dash (Meta's in-headset home, kept off
 //! with Meta's own PreventDashLaunch switch) and the platform runtime (store sign-in and
 //! entitlements; Atrium will answer those itself). RemoteDesktopCompanion stays: OVRServer
@@ -86,47 +87,59 @@ pub fn watch() {
     });
 }
 
-/// Dash is off and the service is running: nothing needs admin.
-pub fn ready() -> bool {
+fn dash_off() -> bool {
     #[cfg(windows)]
-    return sys::reg::dword(CONFIG, "PreventDashLaunch") == Some(1) && running();
+    return sys::reg::dword(CONFIG, "PreventDashLaunch") == Some(1);
     #[cfg(not(windows))]
     false
 }
 
-/// One admin step (UAC): turn Dash off with Meta's switch and start Meta's service if it's
-/// stopped. Skipped when both are already so.
+/// Dash is off and OVRServer is running: nothing to do.
+pub fn ready() -> bool {
+    dash_off() && running()
+}
+
+/// Get OVRServer running with Dash off. Meta's service isn't needed: OVRServer runs as the user
+/// on its own (tested 2026-10-20), so Atrium starts it directly when it isn't already up. The
+/// only admin step (UAC) is turning Dash off with Meta's switch, once per PC.
 pub fn prepare() -> Result<(), String> {
     #[cfg(windows)]
     {
         if !installed() {
             return Err("Meta's runtime isn't installed".into());
         }
-        if ready() {
-            return Ok(());
-        }
-        let inner = format!(
-            "reg add '{CONFIG}' /v PreventDashLaunch /t REG_DWORD /d 1 /f; if ((Get-Service OVRService).Status -ne 'Running') {{ Start-Service OVRService }}"
-        );
-        let ps = format!(
-            "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','{}'",
-            inner.replace('\'', "''")
-        );
-        let mut cmd = std::process::Command::new("powershell.exe");
-        cmd.args(["-NoProfile", "-Command", &ps]);
-        sys::no_window(&mut cmd);
-        let st = cmd.status().map_err(|e| e.to_string())?;
-        if !st.success() {
-            return Err("Windows didn't allow starting Meta's runtime".into());
-        }
-        // OVRServer comes up a few seconds after the service.
-        for _ in 0..20 {
-            if running() {
-                break;
+        if !dash_off() {
+            let inner = format!("reg add '{CONFIG}' /v PreventDashLaunch /t REG_DWORD /d 1 /f");
+            let ps = format!(
+                "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','{}'",
+                inner.replace('\'', "''")
+            );
+            let mut cmd = std::process::Command::new("powershell.exe");
+            cmd.args(["-NoProfile", "-Command", &ps]);
+            sys::no_window(&mut cmd);
+            let st = cmd.status().map_err(|e| e.to_string())?;
+            if !st.success() {
+                return Err("Windows didn't allow turning Meta's Dash off".into());
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            sys::log("meta runtime: Dash off");
         }
-        sys::log("meta runtime: prepared (Dash off, service running)");
+        if !running() {
+            let base = sys::reg::string("HKLM\\SOFTWARE\\Wow6432Node\\Oculus VR, LLC\\Oculus", "Base").ok_or("Meta's runtime isn't installed")?;
+            let dir = std::path::PathBuf::from(base).join("Support").join("oculus-runtime");
+            std::process::Command::new(dir.join("OVRServer_x64.exe"))
+                .current_dir(&dir)
+                .spawn()
+                .map_err(|e| format!("Couldn't start Meta's runtime: {e}"))?;
+            // It accepts games a few seconds after starting.
+            for _ in 0..20 {
+                if running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            sys::log("meta runtime: started OVRServer");
+        }
         Ok(())
     }
     #[cfg(not(windows))]
