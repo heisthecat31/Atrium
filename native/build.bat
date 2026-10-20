@@ -40,6 +40,10 @@ rem ovrprobe: a plain LibOVR app, to see the headset the way games do
 cl.exe /nologo /MT /O2 /EHsc /W3 /I%OVR%\Include /Foobj\ /Fe"out\ovrprobe.exe" src\ovrprobe.cpp %OVR%\Shim\OVR_CAPIShim.c
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+rem riftprobe: Atrium's own Rift CV1 access over HID (no Meta software): config + IMU orientation
+cl.exe /nologo /MT /O2 /EHsc /W3 /Foobj\ /Fe"out\riftprobe.exe" src\riftprobe.cpp
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
 rem SteamFrameSim.exe: the simulated headset, driving Meta's emulator through OculusDebugToolCLI
 rem (src\unsigned_plugin is the dropped plugin route: OVRServer only loads Meta-signed plugins)
 cl.exe /nologo /MT /O2 /EHsc /W3 /Foobj\ /Fe"out\SteamFrameSim.exe" src\steamframe_sim.cpp user32.lib gdi32.lib dwmapi.lib /link /SUBSYSTEM:WINDOWS
