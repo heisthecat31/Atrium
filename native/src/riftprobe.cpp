@@ -161,8 +161,59 @@ struct Fusion {
 	}
 };
 
+// Touch controllers report through the headset's radio (CV1 interface 1): report 0x0c, 64 bytes,
+// up to two 28-byte messages (OpenHMD packet.c, decode_rift_radio_report).
+static int Touch()
+{
+	Hid r;
+	if (!OpenHid(L"vid_2833&pid_0031&mi_01", r)) {
+		printf("No Rift CV1 radio interface found (MI_01).\n");
+		return 1;
+	}
+	printf("Rift CV1 radio: %ls\nReading the Touch controllers for 10 s (read-only). Press buttons, pull triggers.\n", r.path.c_str());
+	std::vector<uint8_t> in(r.inLen ? r.inLen : 64);
+	ULONGLONG start = GetTickCount64(), lastPrint[2] = {};
+	int msgs[2] = {};
+	while (GetTickCount64() - start < 10000) {
+		DWORD got = 0;
+		if (!ReadFile(r.h, in.data(), (DWORD)in.size(), &got, nullptr)) {
+			printf("read failed (error %lu)\n", GetLastError());
+			return 1;
+		}
+		if (got < 64 || in[0] != 0x0c) continue;
+		for (int m = 0; m < 2; m++) {
+			const uint8_t* p = in.data() + 3 + m * 28;
+			uint16_t flags = U16(p);
+			uint8_t type = p[2];
+			if (flags != 0x1c || (type != 2 && type != 3)) continue;   // 2 left, 3 right
+			int hand = type == 2 ? 0 : 1;
+			msgs[hand]++;
+			const uint8_t* q = p + 3;
+			int16_t accel[3], gyro[3];
+			for (int k = 0; k < 3; k++) accel[k] = (int16_t)U16(q + 4 + k * 2);
+			for (int k = 0; k < 3; k++) gyro[k] = (int16_t)U16(q + 10 + k * 2);
+			uint8_t buttons = q[16];
+			const uint8_t* t = q + 17;
+			int trigger = t[0] | ((t[1] & 0x03) << 8);
+			int grip = ((t[1] & 0xfc) >> 2) | ((t[2] & 0x0f) << 6);
+			int sx = ((t[2] & 0xf0) >> 4) | ((t[3] & 0x3f) << 4);
+			int sy = ((t[3] & 0xc0) >> 6) | (t[4] << 2);
+			ULONGLONG now = GetTickCount64();
+			if (now - lastPrint[hand] >= 300) {
+				lastPrint[hand] = now;
+				printf("%s  buttons 0x%02x  trigger %4d  grip %4d  stick %4d %4d  accel %+6d %+6d %+6d  gyro %+6d %+6d %+6d\n",
+					hand ? "right" : "left ", buttons, trigger, grip, sx, sy, accel[0], accel[1], accel[2], gyro[0], gyro[1], gyro[2]);
+			}
+		}
+	}
+	printf("messages in 10 s: left %d, right %d\n", msgs[0], msgs[1]);
+	return 0;
+}
+
 int main(int argc, char** argv)
 {
+	if (argc > 1 && !strcmp(argv[1], "touch"))
+		return Touch();
 	Hid d;
 	if (!OpenHid(kCv1Sensor, d)) {
 		printf("No Rift CV1 sensor interface found (VID 2833 PID 0031 MI_00).\n");
