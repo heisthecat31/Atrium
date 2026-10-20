@@ -46,10 +46,18 @@ pub fn ovr_dir() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
-/// The OpenXR runtime a translated game should use: the Atrium Runtime when it's built, until
-/// then the vendor backend Atrium picked for the connected headset.
-fn xr_runtime(rt: Option<&RuntimeState>) -> Option<PathBuf> {
-    runtime::manifest().or_else(|| rt.and_then(|r| r.chosen.as_ref()).map(|b| b.manifest.clone()))
+/// The OpenXR runtime a translated game should use: the Atrium Runtime when it's built; until
+/// then SteamVR's if it's installed, else the vendor backend Atrium picked for the headset.
+///
+/// Not Meta's OpenXR runtime when SteamVR is there: Echo VR through Atrium OVR on Meta's
+/// runtime (Rift CV1, 2026-10-20) tracks and submits correctly by the logs, yet the picture
+/// moves with the head; the same build on SteamVR (which drives the Rift through Meta's
+/// driver) is correct. Cause not found yet.
+pub fn xr_runtime(rt: Option<&RuntimeState>) -> Option<PathBuf> {
+    let backends = rt.map(|r| r.backends.as_slice()).unwrap_or_default();
+    runtime::manifest()
+        .or_else(|| backends.iter().find(|b| b.id == "steamvr").map(|b| b.manifest.clone()))
+        .or_else(|| rt.and_then(|r| r.chosen.as_ref()).map(|b| b.manifest.clone()))
 }
 
 pub fn mode(game: &Game, settings: &Settings, rt: Option<&RuntimeState>) -> Mode {

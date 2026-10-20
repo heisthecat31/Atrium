@@ -9,7 +9,18 @@
 </head>
 <body>
   <aside id="side"></aside>
-  <main id="main"></main>
+  <div id="content">
+    <header id="titlebar" data-drag>
+      <div class="wincontrols">
+        <button data-win="minimize" title="Minimise"><svg viewBox="0 0 12 12"><path d="M1.5 6h9"/></svg></button>
+        <button data-win="maximize" title="Maximise" id="maxbtn"><svg viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg></button>
+        <button data-win="close" title="Close" class="close"><svg viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8"/></svg></button>
+      </div>
+    </header>
+    <main id="main"></main>
+  </div>
+  <div class="edge n" data-edge="n"></div><div class="edge s" data-edge="s"></div><div class="edge e" data-edge="e"></div><div class="edge w" data-edge="w"></div>
+  <div class="edge ne" data-edge="ne"></div><div class="edge nw" data-edge="nw"></div><div class="edge se" data-edge="se"></div><div class="edge sw" data-edge="sw"></div>
   <div id="drawer" hidden></div>
   <div id="toasts"></div>
   <script type="module" src="app.js"></script>

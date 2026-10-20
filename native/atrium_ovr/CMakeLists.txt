@@ -36,10 +36,18 @@ endforeach()
 # added as CMake projects; the targets below pick the files they need.
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
-# Revive (MIT), upstream ab73167 (2023-08-29): ReviveXR, glad, and its version header.
+# Revive (MIT), upstream ab73167 (2023-08-29): ReviveXR, glad, and its version header. Atrium's
+# changes to it are the patches in patches/, applied in order after download (edit Revive in a
+# git checkout of that commit and regenerate them with git format-patch).
+find_package(Git REQUIRED)
+file(GLOB REVIVE_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
+list(SORT REVIVE_PATCHES)
 FetchContent_Declare(revive
     URL https://github.com/LibreVR/Revive/archive/ab73167e2380135aee9fe9f68874ec7dd2912cb0.tar.gz
     URL_HASH SHA256=71c3e80f2215a13062e58f49e74d238296dcc9cac49e4687d4540619e2bbede9
+    # --git-dir/--work-tree: the build folder may sit inside another git repo (Atrium's), where a
+    # plain git apply would skip every path.
+    PATCH_COMMAND "${GIT_EXECUTABLE}" --git-dir=.nogit --work-tree=. apply --whitespace=nowarn ${REVIVE_PATCHES}
     SOURCE_SUBDIR _none)
 # Oculus PC SDK 1.55 headers and two shim sources. Build time only: nothing of it ships.
 FetchContent_Declare(ovr_sdk

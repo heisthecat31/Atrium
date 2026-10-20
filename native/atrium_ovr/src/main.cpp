@@ -15,6 +15,7 @@
 #include <Shlwapi.h>
 #include <ShlObj.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdarg.h>
 #include <detours/detours.h>
 
@@ -47,6 +48,21 @@ void AtriumOvrLog(const char* fmt, ...)
 		fclose(f);
 	}
 	LeaveCriticalSection(&g_logLock);
+}
+
+// Revive's CHK_XR (patched, see patches/0001): every failed OpenXR call, with its source line.
+void AtriumOvrLogFail(const char* call, int result, const char* file, int line)
+{
+	const char* base = strrchr(file, '\\');
+	AtriumOvrLog("FAILED %d at %s:%d  %s", result, base ? base + 1 : file, line, call);
+}
+
+bool AtriumOvrEverySecond(long long* last)
+{
+	long long now = (long long)GetTickCount64();
+	if (now - *last < 1000) return false;
+	*last = now;
+	return true;
 }
 
 static bool IsOvrRuntime(LPCWSTR path)

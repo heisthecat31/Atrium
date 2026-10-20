@@ -18,7 +18,8 @@ fn main() {
             };
             let hw = services::headsets::detect();
             let st = services::runtime::state(&hw);
-            let xr = services::runtime::manifest().or(st.chosen.map(|b| b.manifest));
+            // ATRIUM_XR=<manifest.json> picks the OpenXR runtime for this run (testing backends).
+            let xr = std::env::var_os("ATRIUM_XR").map(std::path::PathBuf::from).or_else(|| services::launcher::xr_runtime(Some(&st)));
             match services::launcher::translated(&exe, &args[3..], xr.as_deref()) {
                 Ok(pid) => println!("started {} (pid {pid}) on {}", exe.display(), xr.map(|p| p.display().to_string()).unwrap_or("the active OpenXR runtime".into())),
                 Err(e) => {

@@ -70,8 +70,25 @@ svg { display: block; }
 .rt-line { display: flex; align-items: center; gap: 8px; padding: 0 6px; font-size: 12.5px; color: var(--muted); }
 
 /* ---- page ------------------------------------------------------------------------------- */
-#main { overflow-y: auto; overflow-x: hidden; position: relative; }
-.page { padding: 28px 36px 60px; max-width: 1600px; animation: rise .25s ease; }
+/* ---- window chrome (no system title bar) ------------------------------------------------ */
+#content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#titlebar { flex: none; height: 44px; display: flex; justify-content: flex-end; align-items: stretch; background: var(--bg); }
+.wincontrols { display: flex; }
+.wincontrols button { width: 46px; border: 0; background: none; color: var(--muted); display: grid; place-items: center; cursor: default; transition: background .12s, color .12s; }
+.wincontrols button svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.2; }
+.wincontrols button:hover { background: rgba(255,255,255,.07); color: var(--text); }
+.wincontrols button.close:hover { background: #c42b1c; color: #fff; }
+.edge { position: fixed; z-index: 50; }
+.edge.n, .edge.s { left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+.edge.e, .edge.w { top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+.edge.n { top: 0; } .edge.s { bottom: 0; } .edge.e { right: 0; } .edge.w { left: 0; }
+.edge.ne, .edge.nw, .edge.se, .edge.sw { width: 10px; height: 10px; }
+.edge.ne { top: 0; right: 0; cursor: nesw-resize; } .edge.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.edge.nw { top: 0; left: 0; cursor: nwse-resize; } .edge.se { bottom: 0; right: 0; cursor: nwse-resize; }
+body.maxed .edge { display: none; }
+
+#main { flex: 1; overflow-y: auto; overflow-x: hidden; position: relative; }
+.page { padding: 4px 36px 60px; max-width: 1600px; animation: rise .25s ease; }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 h1 { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -.2px; }
 .lede { margin: 4px 0 0; color: var(--muted); }

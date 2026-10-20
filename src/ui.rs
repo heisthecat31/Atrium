@@ -5,14 +5,17 @@
 //! atrium://localhost/ elsewhere), compiled into the exe. Meta's local store art is served at
 //! /art?p=<path>, limited to Meta's StoreAssets folder. The page talks to Rust with
 //! `ipc.postMessage(json)`; Rust answers by running `atrium.update(...)` in the page (app.rs).
-use crate::app::{App, UiEvent};
+//!
+//! The window has no system title bar (like Meta's app): the page draws its own top bar with
+//! minimise / maximise / close, and asks Rust to move or resize the window (`UiEvent::Window`).
+use crate::app::{App, UiEvent, WindowAction};
 use crate::sys;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::window::WindowBuilder;
+use tao::window::{ResizeDirection, WindowBuilder};
 use wry::http::{header::CONTENT_TYPE, Request, Response, StatusCode};
 use wry::{WebContext, WebViewBuilder};
 
@@ -70,6 +73,13 @@ pub fn run() -> ! {
         .with_min_inner_size(LogicalSize::new(960.0, 600.0))
         .with_window_icon(crate::login::window_icon())
         .with_theme(Some(tao::window::Theme::Dark))
+        .with_decorations(false);
+    #[cfg(windows)]
+    let window = {
+        use tao::platform::windows::WindowBuilderExtWindows;
+        window.with_undecorated_shadow(true)
+    };
+    let window = window
         .build(&event_loop)
         .unwrap_or_else(|e| {
             sys::log(&format!("window: {e}"));
@@ -118,6 +128,33 @@ pub fn run() -> ! {
         match event {
             Event::UserEvent(UiEvent::Script(js)) => {
                 let _ = webview.evaluate_script(&js);
+            }
+            Event::UserEvent(UiEvent::Window(action)) => match action {
+                WindowAction::Drag => {
+                    let _ = window.drag_window();
+                }
+                WindowAction::Minimize => window.set_minimized(true),
+                WindowAction::ToggleMaximize => window.set_maximized(!window.is_maximized()),
+                WindowAction::Close => *flow = ControlFlow::Exit,
+                WindowAction::Resize(edge) => {
+                    let dir = match edge.as_str() {
+                        "n" => ResizeDirection::North,
+                        "s" => ResizeDirection::South,
+                        "e" => ResizeDirection::East,
+                        "w" => ResizeDirection::West,
+                        "ne" => ResizeDirection::NorthEast,
+                        "nw" => ResizeDirection::NorthWest,
+                        "se" => ResizeDirection::SouthEast,
+                        _ => ResizeDirection::SouthWest,
+                    };
+                    if !window.is_maximized() {
+                        let _ = window.drag_resize_window(dir);
+                    }
+                }
+            },
+            // The page shows maximise or restore, and drops its resize edges when maximised.
+            Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
+                let _ = webview.evaluate_script(&format!("window.atrium && atrium.maximized({})", window.is_maximized()));
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => *flow = ControlFlow::Exit,
             _ => {}

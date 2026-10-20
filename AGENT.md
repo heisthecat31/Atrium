@@ -71,6 +71,19 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
   `XR_RUNTIME_JSON` = Atrium Runtime manifest when built, else the backend Atrium chose.
   Open: no-Meta-installed case (hook WinVerifyTrust + cert helpers, or ship a stand-in);
   port EchoXR's generic Revive fixes; LibOVRPlatform stand-in for games that need entitlement.
+- 2026-10-20 (11:30-11:53): first real game. Echo VR runs through Atrium OVR (injection works on a
+  signed-shim game). Revive changes live as patches in `native/atrium_ovr/patches/` (applied by
+  CMake with `git --git-dir=.nogit --work-tree=. apply`, since a plain `git apply` inside Atrium's
+  repo skips every path): 0001 trace to ovr.log (failed XR calls, head pose + layers once/s),
+  0002 EchoXR's generic session/frame fixes (no frame begun in BeginSession, recenter after the
+  first xrWaitFrame, wait for READY in the FOV probe on every runtime, opaque eye layers,
+  request OpenXR 1.0), 0003 depth trace + `ATRIUM_OVR_DEPTH=0`.
+  **Open bug:** on Meta's OpenXR runtime (Rift CV1) the picture moves with the head, although the
+  trace shows good head poses, non-head-locked EyeFovDepth layers at 90 fps, no XR errors and
+  sane depth (near 0.05, far 1023); depth off doesn't help. Same build on SteamVR's runtime is
+  correct, and Echo direct on Meta is correct. So translated games prefer SteamVR
+  (`launcher::xr_runtime`); `ATRIUM_XR=<manifest>` overrides for `--translate`. Next suspects:
+  frame/pose timing vs Meta's runtime (absTime -> XrTime), D3D12 image handover on Meta.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).
   Repurposed into Atrium. An Electron prototype was built and verified (detection, library,
   Meta names), then replaced by the native Rust app on the user's request. The detection logic
@@ -87,6 +100,14 @@ Electron): Devices page names the headset in `deviceFamilyNameFromHeadset` by `s
 - Real **Rift CV1**: VID 2833 PID 0031 (HMD), 0211 (sensor ×2), 0330 (Rift Audio).
 - `HKCU\Environment\OVREmulationPlugin=3` → OVRServer reports "HMD X (Emulation)" instead of the
   CV1. Delete it and restart OVRService to get the CV1 back. Ask the user before changing it.
+  (Removed 2026-10-20 11:32 at the user's request; CV1 confirmed working after.)
+- **Trap:** `OVRServerPluginDirectory` (HKCU `SOFTWARE\Oculus VR, LLC\Oculus` and
+  `SOFTWARE\Oculus`) overrides where OVRServer loads its plugins (`Rift.dll` = CV1 driver,
+  `Emulation.dll`, ...). The SteamFrameSim research pointed it at a copy with `Rift.dll` moved to
+  `disabled\`; after the folder rename it pointed nowhere, so OVRServer loaded no plugins and the
+  CV1 vanished ("No HMD attached", no `USBHID:Detector` lines in `%LOCALAPPDATA%\Oculus\Service_*.txt`).
+  Both values deleted 2026-10-20 11:34; Meta's default `oculus-runtime\server-plugins` is intact.
+  `runtime/` here still holds that research copy.
 - OpenXR runtimes registered: Meta, SteamVR (`H:\Program Files (x86)\Steam\steamapps\common\
   SteamVR\steamxr_win64.json`), Virtual Desktop (currently active).
 - Steam at `h:/program files (x86)/steam`; only SteamVR + redist installed.

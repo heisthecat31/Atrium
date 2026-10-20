@@ -9,9 +9,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-/// Sent to the window's event loop; the loop runs it in the page.
+/// Sent to the window's event loop (src/ui.rs).
 pub enum UiEvent {
+    /// Run in the page.
     Script(String),
+    /// From the page's own title bar.
+    Window(WindowAction),
+}
+
+pub enum WindowAction {
+    Drag,
+    Minimize,
+    ToggleMaximize,
+    Close,
+    /// n, s, e, w, ne, nw, se, sw
+    Resize(String),
 }
 
 #[derive(Default)]
@@ -46,8 +58,12 @@ impl App {
     }
 
     fn script(&self, js: String) {
+        self.send(UiEvent::Script(js));
+    }
+
+    fn send(&self, e: UiEvent) {
         if let Ok(p) = self.proxy.lock() {
-            let _ = p.send_event(UiEvent::Script(js));
+            let _ = p.send_event(e);
         }
     }
 
@@ -207,6 +223,14 @@ impl App {
         let arg = |k: &str| m[k].as_str().unwrap_or_default().to_string();
         match m["cmd"].as_str().unwrap_or_default() {
             "ready" => self.push(),
+            "window" => self.send(UiEvent::Window(match arg("action").as_str() {
+                "drag" => WindowAction::Drag,
+                "minimize" => WindowAction::Minimize,
+                "maximize" => WindowAction::ToggleMaximize,
+                "close" => WindowAction::Close,
+                "resize" => WindowAction::Resize(arg("edge")),
+                _ => return,
+            })),
             "refresh" => self.refresh_owned(),
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };

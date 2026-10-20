@@ -1,0 +1,45 @@
+From 478e1b9a637a9c7183633a7b681d967a20b7caba Mon Sep 17 00:00:00 2001
+From: Atrium <atrium@localhost>
+Date: Tue, 20 Oct 2026 11:50:19 +0100
+Subject: [PATCH 3/3] Atrium OVR: trace depth projection; ATRIUM_OVR_DEPTH=0
+ turns depth layers off
+
+---
+ ReviveXR/REV_CAPI.cpp | 4 ++++
+ ReviveXR/Runtime.cpp  | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index 151e634..ae9ecb5 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -1085,6 +1085,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 						depthInfo.farZ *= viewScaleDesc->HmdSpaceToWorldScaleInMeters;
+ 					}
+ 
++					static long long lastDepthTrace = 0;
++					if (i == 0 && AtriumOvrEverySecond(&lastDepthTrace))
++						AtriumOvrLog("  depth: P22 %g P23 %g P32 %g -> nearZ %g farZ %g", projDesc.Projection22, projDesc.Projection23,
++							projDesc.Projection32, depthInfo.nearZ, depthInfo.farZ);
+ 					view.next = &depthData.back();
+ 				}
+ 
+diff --git a/ReviveXR/Runtime.cpp b/ReviveXR/Runtime.cpp
+index 4ccace3..8971203 100644
+--- a/ReviveXR/Runtime.cpp
++++ b/ReviveXR/Runtime.cpp
+@@ -75,6 +75,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+ 
+ 	VisibilityMask = Supports(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+ 	CompositionDepth = Supports(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
++	// Atrium OVR: ATRIUM_OVR_DEPTH=0 stops passing the game's depth buffer to the runtime.
++	char depthSetting[8] = {};
++	if (GetEnvironmentVariableA("ATRIUM_OVR_DEPTH", depthSetting, sizeof(depthSetting)) && depthSetting[0] == '0')
++		CompositionDepth = false;
++	AtriumOvrLog("depth layers: %s", CompositionDepth ? "passed to the runtime" : "off");
+ 	CompositionCube = Supports(XR_KHR_COMPOSITION_LAYER_CUBE_EXTENSION_NAME);
+ 	CompositionCylinder = Supports(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+ 	AudioDevice = Supports(XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME);
+-- 
+2.52.0.windows.1
+

@@ -354,5 +354,24 @@ function notice(text) {
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 300); }, 4500);
 }
 
-window.atrium = { update(s) { S = s; render(); }, notice };
+// Window chrome: drag from the title bar or the sidebar's empty space, double-click to maximise,
+// resize from the edges (src/ui.rs does the moving).
+const RESTORE = '<svg viewBox="0 0 12 12"><rect x="1.5" y="3.5" width="7" height="7" rx="1"/><path d="M3.5 3.5V2.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1"/></svg>';
+const MAXIMIZE = '<svg viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg>';
+const draggable = (t) => (t.closest('[data-drag]') || t.id === 'side' || t.classList?.contains('side-gap')) && !t.closest('button,input,select,a,.nav,.mini');
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  const edge = e.target.closest('[data-edge]');
+  if (edge) { e.preventDefault(); send('window', { action: 'resize', edge: edge.dataset.edge }); return; }
+  if (e.detail === 1 && draggable(e.target)) { e.preventDefault(); send('window', { action: 'drag' }); }
+});
+document.addEventListener('dblclick', (e) => { if (draggable(e.target)) send('window', { action: 'maximize' }); });
+document.addEventListener('click', (e) => { const b = e.target.closest('[data-win]'); if (b) send('window', { action: b.dataset.win }); });
+function maximized(on) {
+  document.body.classList.toggle('maxed', on);
+  const b = $('#maxbtn');
+  if (b) { b.innerHTML = on ? RESTORE : MAXIMIZE; b.title = on ? 'Restore' : 'Maximise'; }
+}
+
+window.atrium = { update(s) { S = s; render(); }, notice, maximized };
 send('ready');

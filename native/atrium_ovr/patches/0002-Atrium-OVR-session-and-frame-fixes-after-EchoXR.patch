@@ -1,0 +1,161 @@
+From e195a14f66eb55978586c5568da574a1f39e26a5 Mon Sep 17 00:00:00 2001
+From: Atrium <atrium@localhost>
+Date: Tue, 20 Oct 2026 11:39:39 +0100
+Subject: [PATCH 2/3] Atrium OVR: session and frame fixes (after EchoXR)
+
+---
+ ReviveXR/REV_CAPI.cpp | 20 +++++++++++++++++++-
+ ReviveXR/Runtime.cpp  |  2 +-
+ ReviveXR/Session.cpp  | 29 ++++++++++++++++++-----------
+ ReviveXR/Session.h    |  5 +++++
+ 4 files changed, 43 insertions(+), 13 deletions(-)
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index 37235b4..151e634 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -914,6 +914,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
+ 	frameState->frameIndex = frameIndex;
+ 	session->CurrentFrame = frameState;
+ 
++	// Atrium OVR: the session's first frame has a predicted time now (see BeginSession).
++	if (session->RecenterPending.exchange(false))
++	{
++		ovrResult r = session->RecenterSpace(ovrTrackingOrigin_EyeLevel, session->ViewSpace);
++		AtriumOvrLog("recentered eye level on frame %lld: %d", frameIndex, (int)r);
++	}
++
+ 	if (session->Input)
+ 		session->Input->SyncInputState(session->Session, frameState->predictedDisplayPeriod);
+ 	return ovrSuccess;
+@@ -935,6 +942,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
+ 
+ 	XrFrameBeginInfo beginInfo = XR_TYPE(FRAME_BEGIN_INFO);
+ 	CHK_XR(xrBeginFrame(session->Session, &beginInfo));
++	session->FrameBegun = true;
+ 	return ovrSuccess;
+ }
+ 
+@@ -1144,7 +1152,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 		}
+ 
+ 		XrCompositionLayerBaseHeader& header = newLayer.Header;
+-		header.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
++		// Atrium OVR (after EchoXR): eye layers are opaque, as on Oculus's compositor; games leave
++		// arbitrary alpha in their eye buffers. Overlays (quads, cylinders, cubes) still blend.
++		const bool eyeLayer = type == ovrLayerType_EyeFov || type == ovrLayerType_EyeMatrix || type == ovrLayerType_EyeFovDepth;
++		header.layerFlags = eyeLayer ? 0 : XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+ 		if (headLocked)
+ 			header.space = session->ViewSpace;
+ 		else
+@@ -1188,6 +1199,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 	endInfo.layerCount = (uint32_t)layers.size();
+ 	endInfo.layers = layers.data();
+ 	CHK_XR(xrEndFrame(session->Session, &endInfo));
++	session->FrameBegun = false;
+ 
+ 	MicroProfileFlip();
+ 
+@@ -1204,6 +1216,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_SubmitFrame2(ovrSession session, long long fr
+ 		return ovrError_InvalidSession;
+ 
+ 	long long currentIndex = (*session->CurrentFrame).frameIndex;
++	// Atrium OVR: a game that only submits gets its first frame opened here (see BeginSession).
++	if (!session->FrameBegun)
++	{
++		CHK_OVR(ovr_WaitToBeginFrame(session, currentIndex));
++		CHK_OVR(ovr_BeginFrame(session, currentIndex));
++	}
+ 	if (frameIndex <= 0)
+ 		frameIndex = currentIndex;
+ 
+diff --git a/ReviveXR/Runtime.cpp b/ReviveXR/Runtime.cpp
+index 9ac774a..4ccace3 100644
+--- a/ReviveXR/Runtime.cpp
++++ b/ReviveXR/Runtime.cpp
+@@ -81,7 +81,7 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+ 	ColorSpace = Supports(XR_FB_COLOR_SPACE_EXTENSION_NAME);
+ 
+ 	XrInstanceCreateInfo createInfo = XR_TYPE(INSTANCE_CREATE_INFO);
+-	createInfo.applicationInfo = { "Revive", REV_VERSION_INT, "Revive", REV_VERSION_INT, XR_CURRENT_API_VERSION };
++	createInfo.applicationInfo = { "Revive", REV_VERSION_INT, "Revive", REV_VERSION_INT, XR_API_VERSION_1_0 };
+ 	createInfo.enabledExtensionCount = (uint32_t)m_extensions.size();
+ 	createInfo.enabledExtensionNames = m_extensions.data();
+ 	CHK_XR(xrCreateInstance(&createInfo, out_Instance));
+diff --git a/ReviveXR/Session.cpp b/ReviveXR/Session.cpp
+index 33ff2dc..7668794 100644
+--- a/ReviveXR/Session.cpp
++++ b/ReviveXR/Session.cpp
+@@ -92,13 +92,15 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 		graphicsBinding.device = pDevice.Get();
+ 		CHK_OVR(StartSession(&graphicsBinding));
+ 
+-		if (Runtime::Get().UseHack(Runtime::HACK_WAIT_FOR_SESSION_READY))
++		// Atrium OVR (after EchoXR): every runtime, not only WMR, may refuse to locate views before
++		// the session is ready, so always wait for READY (bounded) and begin the probe session.
+ 		{
+-			// Synchronously wait for the fake session to become ready.
+ 			XrEventDataBuffer event;
+ 			const XrEventDataSessionStateChanged& stateChanged =
+ 				reinterpret_cast<XrEventDataSessionStateChanged&>(event);
+-			do
++			const auto deadline = std::chrono::steady_clock::now() + 10s;
++			bool ready = false;
++			while (!ready && std::chrono::steady_clock::now() < deadline)
+ 			{
+ 				event = XR_TYPE(EVENT_DATA_BUFFER);
+ 				XrResult result = xrPollEvent(Instance, &event);
+@@ -106,9 +108,11 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 					break;
+ 				if (result == XR_EVENT_UNAVAILABLE)
+ 					std::this_thread::sleep_for(10ms);
+-			} while (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED ||
+-				stateChanged.state != XR_SESSION_STATE_READY);
+-			assert(stateChanged.session == Session);
++				else if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED && stateChanged.state == XR_SESSION_STATE_READY)
++					ready = true;
++			}
++			if (!ready)
++				AtriumOvrLog("field-of-view probe: session never became ready");
+ 
+ 			XrSessionBeginInfo beginInfo = XR_TYPE(SESSION_BEGIN_INFO);
+ 			beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+@@ -197,11 +201,14 @@ ovrResult ovrHmdStruct::BeginSession()
+ 	beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+ 	CHK_XR(xrBeginSession(Session, &beginInfo));
+ 
+-	// Start the first frame immediately in case the app uses SubmitFrame().
+-	long long currentIndex = (*CurrentFrame).frameIndex;
+-	CHK_OVR(ovr_WaitToBeginFrame(this, currentIndex));
+-	RecenterSpace(ovrTrackingOrigin_EyeLevel, ViewSpace);
+-	CHK_OVR(ovr_BeginFrame(this, currentIndex));
++	// Atrium OVR (after EchoXR): no frame is begun here. This runs on whichever thread polls the
++	// session status, and waiting for a frame here raced the game's own frame calls on its render
++	// thread. The eye-level origin is recentered after the first xrWaitFrame instead
++	// (ovr_WaitToBeginFrame), and a game that only calls ovr_SubmitFrame gets its first frame
++	// opened there.
++	FrameBegun = false;
++	RecenterPending = true;
++	AtriumOvrLog("session begun");
+ 	return ovrSuccess;
+ }
+ 
+diff --git a/ReviveXR/Session.h b/ReviveXR/Session.h
+index 171f3ad..6dba156 100644
+--- a/ReviveXR/Session.h
++++ b/ReviveXR/Session.h
+@@ -83,6 +83,11 @@ struct ovrHmdStruct
+ 	ovrResult InitSession(XrInstance instance);
+ 	ovrResult StartSession(void* graphicsBinding);
+ 	ovrResult BeginSession();
++
++	// The eye-level origin is recentered on the first frame that has a predicted time.
++	std::atomic<bool> RecenterPending = false;
++	// A frame has been begun (ovr_BeginFrame) and not yet ended.
++	std::atomic<bool> FrameBegun = false;
+ 	ovrResult EndSession();
+ 	ovrResult DestroySession();
+ 
+-- 
+2.52.0.windows.1
+
