@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# Native build output
+/native/obj/
+/native/out/
+
+# Meta / Valve material: never commit (see AGENT.md)
+/runtime/
+/native/third_party/LibOVR/
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
