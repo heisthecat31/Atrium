@@ -1,0 +1,84 @@
+Atrium: register the Atrium streaming driver (native/atrium_monado/atrium_stream, copied to
+src/xrt/drivers/atrium_stream by the build): option XRT_BUILD_DRIVER_ATRIUM_STREAM, the driver
+library, and its builder first in the builder list (active only with ATRIUM_STREAM=1).
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a341e0015..45ccb3742 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -388,6 +388,7 @@ option_with_deps(XRT_BUILD_DRIVER_XREAL_AIR "Enable Xreal Air HMD driver" DEPEND
+ option_with_deps(XRT_BUILD_DRIVER_SIMULAVR "Enable simula driver" DEPENDS XRT_HAVE_REALSENSE)
+ option_with_deps(XRT_BUILD_DRIVER_SOLARXR "Enable SolarXR driver" DEPENDS XRT_HAVE_LINUX XRT_MODULE_IPC)
+ option(XRT_BUILD_DRIVER_SIMULATED "Enable simulated driver" ON)
++option(XRT_BUILD_DRIVER_ATRIUM_STREAM "Enable Atrium streaming driver (Quest, Pico via ALVR server_core)" OFF)
+ 
+ option(XRT_BUILD_SAMPLES "Enable compiling sample code implementations that will not be linked into any final targets" ON)
+ set(XRT_IPC_MSG_SOCK_FILENAME monado_comp_ipc CACHE STRING "Service socket filename")
+@@ -470,6 +471,7 @@ list(
+ 	APPEND
+ 	AVAILABLE_DRIVERS
+ 	"ANDROID"
++	"ATRIUM_STREAM"
+ 	"ARDUINO"
+ 	"BLUBUR_S1"
+ 	"CONTACTGLOVE"
+diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
+index cd8aaa73c..a2b8eee6a 100644
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -72,6 +72,11 @@ if(XRT_BUILD_DRIVER_DEPTHAI)
+ 	list(APPEND ENABLED_DRIVERS depthai)
+ endif()
+ 
++if(XRT_BUILD_DRIVER_ATRIUM_STREAM)
++	add_subdirectory(atrium_stream)
++	list(APPEND ENABLED_HEADSET_DRIVERS atrium_stream)
++endif()
++
+ if(XRT_BUILD_DRIVER_SIMULATED)
+ 	add_library(
+ 		drv_simulated STATIC simulated/simulated_controller.c simulated/simulated_hmd.c
+diff --git a/src/xrt/targets/common/CMakeLists.txt b/src/xrt/targets/common/CMakeLists.txt
+index f3f46c911..ff0855f33 100644
+--- a/src/xrt/targets/common/CMakeLists.txt
++++ b/src/xrt/targets/common/CMakeLists.txt
+@@ -56,6 +56,13 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+ 	target_sources(target_lists PRIVATE target_builder_steamvr.c)
+ endif()
+ 
++if(XRT_BUILD_DRIVER_ATRIUM_STREAM)
++	target_sources(
++		target_lists PRIVATE ${PROJECT_SOURCE_DIR}/src/xrt/drivers/atrium_stream/target_builder_atrium_stream.c
++		)
++	target_link_libraries(target_lists PRIVATE drv_atrium_stream)
++endif()
++
+ if(XRT_BUILD_DRIVER_SIMULATED)
+ 	target_sources(target_lists PRIVATE target_builder_simulated.c)
+ endif()
+diff --git a/src/xrt/targets/common/target_lists.c b/src/xrt/targets/common/target_lists.c
+index 78efb9b3b..1b5130780 100644
+--- a/src/xrt/targets/common/target_lists.c
++++ b/src/xrt/targets/common/target_lists.c
+@@ -24,6 +24,10 @@
+ #include "contactglove/contactglove_interface.h"
+ #endif
+ 
++#ifdef XRT_BUILD_DRIVER_ATRIUM_STREAM
++#include "atrium_stream/atrium_stream_interface.h"
++#endif
++
+ #ifdef XRT_BUILD_DRIVER_SIMULATED
+ #include "simulated/simulated_interface.h"
+ #endif
+@@ -112,6 +116,10 @@
+  * Builders
+  */
+ xrt_builder_create_func_t target_builder_list[] = {
++#ifdef XRT_BUILD_DRIVER_ATRIUM_STREAM // Atrium: first, only active with ATRIUM_STREAM=1.
++    atrium_stream_builder_create,
++#endif // XRT_BUILD_DRIVER_ATRIUM_STREAM
++
+ #ifdef T_BUILDER_QWERTY // High up to override any real hardware.
+     t_builder_qwerty_create,
+ #endif // T_BUILDER_QWERTY
