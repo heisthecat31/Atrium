@@ -1,0 +1,129 @@
+Atrium: OVRPlugin quirk. Meta's OVRPlugin (instance name "Oculus VR Plugin ...") needs the
+runtime name "Oculus" and locates poses at XrTime 0 ("now" on Meta's runtime). For those instances only,
+the name reads "Oculus" and time 0 becomes the current time. Idea from RiftLift's OpenXR layer (MIT).
+
+diff --git a/src/xrt/state_trackers/oxr/oxr_api_session.c b/src/xrt/state_trackers/oxr/oxr_api_session.c
+index bd34ea43e..02d6b612a 100644
+--- a/src/xrt/state_trackers/oxr/oxr_api_session.c
++++ b/src/xrt/state_trackers/oxr/oxr_api_session.c
+@@ -261,6 +261,10 @@ oxr_xrLocateViews(XrSession session,
+ 		OXR_VERIFY_ARG_ARRAY_ELEMENT_TYPE(&log, views, i, XR_TYPE_VIEW);
+ 	}
+ 
++	XrViewLocateInfo adjustedViewLocateInfo = *viewLocateInfo;
++	adjustedViewLocateInfo.displayTime = oxr_instance_ovrplugin_time(sess->sys->inst, viewLocateInfo->displayTime);
++	viewLocateInfo = &adjustedViewLocateInfo;
++
+ 	if (viewLocateInfo->displayTime <= (XrTime)0) {
+ 		return oxr_error(&log, XR_ERROR_TIME_INVALID, "(time == %" PRIi64 ") is not a valid time.",
+ 		                 viewLocateInfo->displayTime);
+diff --git a/src/xrt/state_trackers/oxr/oxr_api_space.c b/src/xrt/state_trackers/oxr/oxr_api_space.c
+index 8526b6644..b26dd8e62 100644
+--- a/src/xrt/state_trackers/oxr/oxr_api_space.c
++++ b/src/xrt/state_trackers/oxr/oxr_api_space.c
+@@ -232,6 +232,7 @@ oxr_xrLocateSpace(XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation
+ 	OXR_VERIFY_SPACE_NOT_NULL(&log, baseSpace, baseSpc);
+ 	OXR_VERIFY_ARG_TYPE_AND_NOT_NULL(&log, location, XR_TYPE_SPACE_LOCATION);
+ 
++	time = oxr_instance_ovrplugin_time(spc->sess->sys->inst, time);
+ 	if (time <= (XrTime)0) {
+ 		return oxr_error(&log, XR_ERROR_TIME_INVALID, "(time == %" PRIi64 ") is not a valid time.", time);
+ 	}
+@@ -282,6 +283,10 @@ locate_spaces(XrSession session, const XrSpacesLocateInfo *locateInfo, XrSpaceLo
+ 	}
+ 
+ 
++	XrSpacesLocateInfoKHR adjustedInfo = *locateInfo;
++	adjustedInfo.time = oxr_instance_ovrplugin_time(spc->sess->sys->inst, locateInfo->time);
++	locateInfo = &adjustedInfo;
++
+ 	if (locateInfo->time <= (XrTime)0) {
+ 		return oxr_error(&log, XR_ERROR_TIME_INVALID, "(time == %" PRIi64 ") is not a valid time.",
+ 		                 locateInfo->time);
+diff --git a/src/xrt/state_trackers/oxr/oxr_instance.c b/src/xrt/state_trackers/oxr/oxr_instance.c
+index 13b8acf1f..d13436afc 100644
+--- a/src/xrt/state_trackers/oxr/oxr_instance.c
++++ b/src/xrt/state_trackers/oxr/oxr_instance.c
+@@ -29,6 +29,7 @@
+ #include "android/android_globals.h"
+ #endif
+ 
++#include "os/os_time.h"
+ #include "oxr_objects.h"
+ #include "oxr_logger.h"
+ #include "oxr_handle_base.h"
+@@ -209,6 +210,7 @@ apply_quirks(struct oxr_logger *log, struct oxr_instance *inst, const XrInstance
+ 	inst->quirks.parallel_views = false;
+ 	inst->quirks.no_texture_source_alpha = false;
+ 	inst->quirks.no_usage_bit_validation_in_create_swapchain = false;
++	inst->quirks.ovrplugin = false;
+ 
+ 	if (starts_with("UnrealEngine", inst->appinfo.detected.engine.name) && //
+ 	    inst->appinfo.detected.engine.major == 4 &&                        //
+@@ -227,6 +229,11 @@ apply_quirks(struct oxr_logger *log, struct oxr_instance *inst, const XrInstance
+ 		inst->quirks.no_usage_bit_validation_in_create_swapchain = true;
+ 	}
+ 
++	// Meta's OVRPlugin names its instance "Oculus VR Plugin (<engine>)". (Atrium)
++	if (starts_with("Oculus VR Plugin", create_info->applicationInfo.applicationName)) {
++		inst->quirks.ovrplugin = true;
++	}
++
+ 	// Currently always true.
+ 	inst->quirks.no_validation_error_in_create_ref_space = true;
+ 
+@@ -579,12 +586,24 @@ oxr_instance_init_system_locked(struct oxr_logger *log, struct oxr_instance *ins
+ }
+ 
+ 
++XrTime
++oxr_instance_ovrplugin_time(struct oxr_instance *inst, XrTime time)
++{
++	if (time != 0 || !inst->quirks.ovrplugin) {
++		return time;
++	}
++	return time_state_monotonic_to_ts_ns(inst->timekeeping, os_monotonic_get_ns());
++}
++
+ XrResult
+ oxr_instance_get_properties(struct oxr_logger *log, struct oxr_instance *inst, XrInstanceProperties *instanceProperties)
+ {
+ 	instanceProperties->runtimeVersion = XR_MAKE_VERSION(u_version_major, u_version_minor, u_version_patch);
+ 	snprintf(instanceProperties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE - 1, "%s '%s'", u_runtime_description,
+ 	         u_git_tag);
++	if (inst->quirks.ovrplugin) {
++		snprintf(instanceProperties->runtimeName, XR_MAX_RUNTIME_NAME_SIZE - 1, "Oculus");
++	}
+ 
+ 	return XR_SUCCESS;
+ }
+diff --git a/src/xrt/state_trackers/oxr/oxr_objects.h b/src/xrt/state_trackers/oxr/oxr_objects.h
+index 46e88025b..375c03f1d 100644
+--- a/src/xrt/state_trackers/oxr/oxr_objects.h
++++ b/src/xrt/state_trackers/oxr/oxr_objects.h
+@@ -191,6 +191,12 @@ oxr_instance_init_system_locked(struct oxr_logger *log, struct oxr_instance *ins
+ /*!
+  * @public @memberof oxr_instance
+  */
++/*!
++ * OVRPlugin quirk: XrTime 0 means the current time. Other times and apps pass through. (Atrium)
++ */
++XrTime
++oxr_instance_ovrplugin_time(struct oxr_instance *inst, XrTime time);
++
+ XrResult
+ oxr_instance_get_properties(struct oxr_logger *log,
+                             struct oxr_instance *inst,
+@@ -1245,6 +1251,12 @@ struct oxr_instance
+ 		//! Unreal 4 has a bug calling xrEndSession; the function should just exit
+ 		bool skip_end_session;
+ 
++		/*!
++		 * Meta's OVRPlugin (Unity/Unreal): picks its code paths from the runtime name and needs
++		 * "Oculus", and locates poses at XrTime 0, which Meta's runtime takes as "now". (Atrium)
++		 */
++		bool ovrplugin;
++
+ 		/*!
+ 		 * Return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED instead of
+ 		 * XR_ERROR_VALIDATION_FAILURE in xrCreateReferenceSpace.

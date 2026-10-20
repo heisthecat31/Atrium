@@ -7,6 +7,7 @@
 // with; xrGetInstanceProcAddr then hands out the backend's own functions (no overhead) except
 // the few Atrium wraps:
 //   xrGetInstanceProperties  the runtime is "Atrium"
+//   OVRPlugin games          runtime name and time-0 poses (see "OVRPlugin games" below)
 //   frame loop + swapchains  traced to %APPDATA%\Atrium\logs\xr.log when ATRIUM_XR_TRACE=1
 // Later versions replace backends with Atrium's own drivers, headset by headset.
 #include <windows.h>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
@@ -202,12 +204,120 @@ template <typename F> static F Next(const char* name)
 	return it == g_next.end() ? nullptr : (F)it->second;
 }
 
+// ---- OVRPlugin games ------------------------------------------------------------------------
+// Unity/Unreal games built with Meta's OVRPlugin create their instance as "Oculus VR Plugin
+// (...)". Two things trip it on runtimes other than Meta's own:
+//   - it picks its code paths from the runtime name and needs "Oculus";
+//   - it asks for poses at XrTime 0, which only Meta's runtime takes as "now".
+// For those instances only, the name reads "Oculus" and time 0 becomes the current time
+// (through XR_KHR_win32_convert_performance_counter_time, enabled for them at instance
+// creation if the backend has it). Every other app gets the backend's functions untouched.
+// The idea comes from RiftLift's OpenXR layer (MIT); this is Atrium's own code.
+static const char kOvrPluginName[] = "Oculus VR Plugin";
+static std::mutex g_ovrLock;
+static std::unordered_map<uint64_t, bool> g_ovrInstances;   // instance -> is OVRPlugin
+static std::atomic<uint64_t> g_ovrInstance;                 // the OVRPlugin instance, for time conversion
+static PFN_xrConvertWin32PerformanceCounterToTimeKHR g_convertTime;
+
+static bool IsOvrPlugin(XrInstance instance)
+{
+	std::lock_guard<std::mutex> lk(g_ovrLock);
+	auto it = g_ovrInstances.find((uint64_t)instance);
+	return it != g_ovrInstances.end() && it->second;
+}
+
+// Time 0 from OVRPlugin: the current time on the runtime's clock.
+static XrTime OvrTime(XrTime t)
+{
+	if (t != 0 || !g_convertTime) return t;
+	LARGE_INTEGER qpc;
+	XrTime now = 0;
+	if (QueryPerformanceCounter(&qpc) && XR_SUCCEEDED(g_convertTime((XrInstance)g_ovrInstance.load(), &qpc, &now))) return now;
+	return t;
+}
+
+static bool BackendHasExtension(const char* ext)
+{
+	PFN_xrEnumerateInstanceExtensionProperties enumerate = nullptr;
+	g_backendGipa(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", (PFN_xrVoidFunction*)&enumerate);
+	uint32_t n = 0;
+	if (!enumerate || XR_FAILED(enumerate(nullptr, 0, &n, nullptr))) return false;
+	std::vector<XrExtensionProperties> props(n, { XR_TYPE_EXTENSION_PROPERTIES });
+	if (XR_FAILED(enumerate(nullptr, n, &n, props.data()))) return false;
+	for (const XrExtensionProperties& p : props)
+		if (strcmp(p.extensionName, ext) == 0) return true;
+	return false;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateInstance(const XrInstanceCreateInfo* info, XrInstance* instance)
+{
+	auto next = Next<PFN_xrCreateInstance>("xrCreateInstance");
+	bool ovr = info && strncmp(info->applicationInfo.applicationName, kOvrPluginName, sizeof kOvrPluginName - 1) == 0;
+	if (!ovr) return next(info, instance);
+
+	// OVRPlugin: make sure the time conversion is there for its time-0 queries.
+	const char* convert = XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME;
+	std::vector<const char*> exts(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
+	bool has = false;
+	for (const char* e : exts) has = has || strcmp(e, convert) == 0;
+	XrInstanceCreateInfo ci = *info;
+	if (!has && BackendHasExtension(convert)) {
+		exts.push_back(convert);
+		ci.enabledExtensionCount = (uint32_t)exts.size();
+		ci.enabledExtensionNames = exts.data();
+		has = true;
+	}
+	XrResult r = next(&ci, instance);
+	if (XR_SUCCEEDED(r)) {
+		{
+			std::lock_guard<std::mutex> lk(g_ovrLock);
+			g_ovrInstances[(uint64_t)*instance] = true;
+		}
+		g_ovrInstance = (uint64_t)*instance;
+		if (has) g_backendGipa(*instance, "xrConvertWin32PerformanceCounterToTimeKHR", (PFN_xrVoidFunction*)&g_convertTime);
+		Log("OVRPlugin game (%s): compatibility on, time conversion %s", info->applicationInfo.applicationName, g_convertTime ? "ready" : "missing");
+	}
+	return r;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrDestroyInstance(XrInstance instance)
+{
+	XrResult r = Next<PFN_xrDestroyInstance>("xrDestroyInstance")(instance);
+	if (XR_SUCCEEDED(r)) {
+		std::lock_guard<std::mutex> lk(g_ovrLock);
+		g_ovrInstances.erase((uint64_t)instance);
+		if (g_ovrInstance == (uint64_t)instance) {
+			g_ovrInstance = 0;
+			g_convertTime = nullptr;
+		}
+	}
+	return r;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrLocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location)
+{
+	return Next<PFN_xrLocateSpace>("xrLocateSpace")(space, base, OvrTime(time), location);
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrLocateViews(XrSession session, const XrViewLocateInfo* info, XrViewState* state,
+	uint32_t capacity, uint32_t* count, XrView* views)
+{
+	auto next = Next<PFN_xrLocateViews>("xrLocateViews");
+	if (!info || info->displayTime != 0) return next(session, info, state, capacity, count, views);
+	XrViewLocateInfo li = *info;
+	li.displayTime = OvrTime(0);
+	return next(session, &li, state, capacity, count, views);
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrGetInstanceProperties(XrInstance instance, XrInstanceProperties* props)
 {
 	XrResult r = Next<PFN_xrGetInstanceProperties>("xrGetInstanceProperties")(instance, props);
 	if (XR_SUCCEEDED(r)) {
 		char name[XR_MAX_RUNTIME_NAME_SIZE];
-		snprintf(name, sizeof name, "Atrium (%s)", g_backendName.c_str());
+		if (IsOvrPlugin(instance))
+			snprintf(name, sizeof name, "Oculus");
+		else
+			snprintf(name, sizeof name, "Atrium (%s)", g_backendName.c_str());
 		strcpy_s(props->runtimeName, name);
 	}
 	return r;
@@ -316,16 +426,23 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrEndFrame(XrSession session, const
 	return r;
 }
 
-struct Wrap { const char* name; PFN_xrVoidFunction fn; bool traceOnly; };
+// When each wrapper is handed out: always, only with ATRIUM_XR_TRACE=1, or only to OVRPlugin
+// instances (everything else keeps the backend's function, no overhead).
+enum class When { Always, Trace, OvrPlugin };
+struct Wrap { const char* name; PFN_xrVoidFunction fn; When when; };
 static const Wrap g_wraps[] = {
-	{ "xrGetInstanceProperties", (PFN_xrVoidFunction)Atrium_xrGetInstanceProperties, false },
-	{ "xrCreateSession", (PFN_xrVoidFunction)Atrium_xrCreateSession, true },
-	{ "xrCreateReferenceSpace", (PFN_xrVoidFunction)Atrium_xrCreateReferenceSpace, true },
-	{ "xrCreateSwapchain", (PFN_xrVoidFunction)Atrium_xrCreateSwapchain, true },
-	{ "xrAcquireSwapchainImage", (PFN_xrVoidFunction)Atrium_xrAcquireSwapchainImage, true },
-	{ "xrReleaseSwapchainImage", (PFN_xrVoidFunction)Atrium_xrReleaseSwapchainImage, true },
-	{ "xrWaitFrame", (PFN_xrVoidFunction)Atrium_xrWaitFrame, true },
-	{ "xrEndFrame", (PFN_xrVoidFunction)Atrium_xrEndFrame, true },
+	{ "xrCreateInstance", (PFN_xrVoidFunction)Atrium_xrCreateInstance, When::Always },
+	{ "xrDestroyInstance", (PFN_xrVoidFunction)Atrium_xrDestroyInstance, When::Always },
+	{ "xrGetInstanceProperties", (PFN_xrVoidFunction)Atrium_xrGetInstanceProperties, When::Always },
+	{ "xrLocateSpace", (PFN_xrVoidFunction)Atrium_xrLocateSpace, When::OvrPlugin },
+	{ "xrLocateViews", (PFN_xrVoidFunction)Atrium_xrLocateViews, When::OvrPlugin },
+	{ "xrCreateSession", (PFN_xrVoidFunction)Atrium_xrCreateSession, When::Trace },
+	{ "xrCreateReferenceSpace", (PFN_xrVoidFunction)Atrium_xrCreateReferenceSpace, When::Trace },
+	{ "xrCreateSwapchain", (PFN_xrVoidFunction)Atrium_xrCreateSwapchain, When::Trace },
+	{ "xrAcquireSwapchainImage", (PFN_xrVoidFunction)Atrium_xrAcquireSwapchainImage, When::Trace },
+	{ "xrReleaseSwapchainImage", (PFN_xrVoidFunction)Atrium_xrReleaseSwapchainImage, When::Trace },
+	{ "xrWaitFrame", (PFN_xrVoidFunction)Atrium_xrWaitFrame, When::Trace },
+	{ "xrEndFrame", (PFN_xrVoidFunction)Atrium_xrEndFrame, When::Trace },
 };
 
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
@@ -333,7 +450,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrGetInstanceProcAddr(XrInstance in
 	XrResult r = g_backendGipa(instance, name, function);
 	if (XR_FAILED(r) || !*function) return r;
 	for (const Wrap& w : g_wraps) {
-		if (strcmp(name, w.name) != 0 || (w.traceOnly && !g_trace)) continue;
+		if (strcmp(name, w.name) != 0) continue;
+		if ((w.when == When::Trace && !g_trace) || (w.when == When::OvrPlugin && !IsOvrPlugin(instance))) break;
 		{
 			std::lock_guard<std::mutex> lk(g_fnLock);
 			g_next[name] = *function;

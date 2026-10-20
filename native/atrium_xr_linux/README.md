@@ -37,6 +37,8 @@ Edit Monado in a checkout of the pinned commit, then regenerate with `git diff` 
 
 - `0001`: report the runtime as "Atrium" in `xrGetInstanceProperties`.
 - `0002`: the system name is the headset's own ("Oculus Rift CV1"), not "Monado: ...".
+- `0003`: OVRPlugin quirk: apps named "Oculus VR Plugin ..." (Meta's Unity/Unreal plugin) see the
+  runtime name "Oculus" and may locate poses at XrTime 0 (= now). Same as the Windows runtime.
 
 ## Hardware access
 

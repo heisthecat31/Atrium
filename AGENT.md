@@ -49,6 +49,15 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-20 (15:30-16:00): **OVRPlugin games** (Unity/Unreal with Meta's OVRPlugin, instance
+  name "Oculus VR Plugin (...)"). They need the runtime name "Oculus" and locate poses at XrTime 0
+  (only Meta's runtime takes that as "now"). Approach from RiftLift's OpenXR layer (MIT), Atrium's
+  own code, built into the Atrium Runtime instead of a separate layer: Windows `runtime.cpp`
+  ("OVRPlugin games" section; also enables XR_KHR_win32_convert_performance_counter_time for them;
+  locate wrappers only handed to OVRPlugin instances) and Linux patch 0003 (Monado quirk).
+  Tested: Windows on Meta's backend (name "Oculus", time conversion available; ordinary apps keep
+  "Atrium (Oculus OpenXR)"); Linux headless session (time 0 ok for OVRPlugin, TIME_INVALID for
+  others). Not yet tested with a real OVRPlugin game.
 - 2026-10-20 (15:00-15:30): **Atrium Runtime for Linux** (`native/atrium_xr_linux`). User chose
   "built on Monado" (not from scratch, not a user-installed Monado) and build-only for now (no
   Linux boot on the test PC; WSL2 can't drive the headset display).
