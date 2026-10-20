@@ -135,6 +135,16 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     3D Vision stereo + VRR). With the panel on, WinRT DisplayManager still lists only the 2
     desktop monitors; Vulkan exposes no VK_KHR_display / VK_EXT_direct_mode_display /
     VK_NV_acquire_winrt_display. That exhausts the public Windows software routes on this PC.
+  - **Decision (user):** no hardware adapters (not every user can buy one). For Rift on
+    Windows + NVIDIA, Atrium runs Meta's runtime **barebones** as its display backend:
+    `src/services/meta_runtime.rs`. Only OVRServer_x64 (+ its service) is kept. Dash off via
+    Meta's own `HKLM\SOFTWARE\Wow6432Node\Oculus VR, LLC\Oculus\Config\PreventDashLaunch=1`
+    (set together with starting OVRService in one UAC step, `prepare()`, on the first Rift-game
+    launch). Client.exe (Meta Horizon Link app) and oculus-platform-runtime are closed by the
+    hardware loop every 5 s (`strip()`); the runtime keeps working without them (ovrprobe sees
+    CV1 + both Touch). RemoteDesktopCompanion is left alone: OVRServer restarts it within ~1 s
+    of every exit (`onCoreTrackerExit::launchRemoteDesktop`). Open: games that check Meta
+    entitlements need the platform runtime until Atrium's LibOVRPlatform stand-in exists.
     Remaining routes: hardware EDID adapter, Linux (VK_KHR_display lists hidden HMDs),
     NVIDIA VRWorks licence. Don't use private/undocumented NVAPI entry points.
 - 2026-10-20: started as SteamFrameSim (simulated Steam Frame on Meta's emulated headset).

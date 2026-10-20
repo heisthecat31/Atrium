@@ -2,7 +2,7 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, launcher, library::{self as lib, Game, Owned}, runtime::{self as rt, RuntimeState}};
+use crate::services::{headsets::{self, Hardware}, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}};
 use crate::sys::{self, settings::{GameOptions, LocalGame, Settings}};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,6 +108,10 @@ impl App {
             let hw = headsets::detect();
             let st = rt::state(&hw);
             rt::write_backend(&st);
+            // Atrium keeps only OVRServer of Meta's runtime; its app, Dash and the rest go.
+            if meta_runtime::running() {
+                meta_runtime::strip();
+            }
             {
                 let mut s = app.st();
                 s.hw = Some(hw);
@@ -234,18 +238,29 @@ impl App {
             "refresh" => self.refresh_owned(),
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };
-                let r = {
-                    let mut guard = self.st();
-                    let s = &mut *guard;
-                    launcher::launch(&g, &mut s.settings, s.rt.as_ref())
-                };
-                match r {
-                    Ok(()) => {
-                        self.notice(if g.installed { format!("Starting {}", g.name) } else { format!("Opening {} in its store", g.name) });
-                        self.rescan();
+                self.spawn(move |app| {
+                    // A game on Meta's backend needs OVRServer up (and Dash off) before it starts.
+                    let on_meta = app.st().rt.as_ref().and_then(|r| r.chosen.as_ref()).is_some_and(|b| b.id == "meta");
+                    if g.installed && on_meta && !meta_runtime::ready() {
+                        if let Err(e) = meta_runtime::prepare() {
+                            app.notice(e);
+                            return;
+                        }
+                        meta_runtime::strip();
                     }
-                    Err(e) => self.notice(e),
-                }
+                    let r = {
+                        let mut guard = app.st();
+                        let s = &mut *guard;
+                        launcher::launch(&g, &mut s.settings, s.rt.as_ref())
+                    };
+                    match r {
+                        Ok(()) => {
+                            app.notice(if g.installed { format!("Starting {}", g.name) } else { format!("Opening {} in its store", g.name) });
+                            app.rescan();
+                        }
+                        Err(e) => app.notice(e),
+                    }
+                });
             }
             "setMode" => {
                 let (id, mode) = (arg("id"), arg("mode"));

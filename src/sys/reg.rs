@@ -16,6 +16,10 @@ pub fn string(path: &str, name: &str) -> Option<String> {
     open(path)?.get_value::<String, _>(name).ok().filter(|s| !s.is_empty())
 }
 
+pub fn dword(path: &str, name: &str) -> Option<u32> {
+    open(path)?.get_value::<u32, _>(name).ok()
+}
+
 /// Value names of a key (OpenXR's AvailableRuntimes keeps the manifest paths as names).
 pub fn value_names(path: &str) -> Vec<String> {
     open(path).map(|k| k.enum_values().filter_map(|v| v.ok().map(|(n, _)| n)).collect()).unwrap_or_default()
