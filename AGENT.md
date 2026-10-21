@@ -212,6 +212,10 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     Atrium OVR whenever it's built; `runtime.json` is rewritten before every launch.
   - Revive patches now: 0001 trace, 0002 EchoXR session/frame fixes, 0003 depth trace/switch,
     0004 D3D12 negotiated format, 0005 FOV crop, 0006 timing trace, 0007 pixelsPerDisplayPixel.
+    Later: 0008 slow-call log, 0009 FOV probe cache (per runtime+headset, with eye poses, in
+    %APPDATA%\Atrium\ovr_fov_cache.txt; 2 s READY wait), 0010 real headset description,
+    0011 Rift Sensors + serial from USB. User confirmed in Echo 2026-10-21: CV1 seen, sensors
+    shown, no per-launch delay, 2nd launch displays correctly. Sensor poses are still virtual.
   - Open: games Steam starts can only reach the Atrium Runtime if it's registered system-wide
     (Runtime page button, UAC); Atrium Runtime is Windows-only so far; no-Meta-installed case for
     signed-shim games; LibOVRPlatform stand-in.
