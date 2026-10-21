@@ -307,6 +307,12 @@ function settings() {
       <select class="input" id="closeaction" style="width:200px">
         ${[['ask', 'Ask me'], ['tray', 'Close to tray'], ['quit', 'Quit Atrium']].map(([v, l]) => `<option value="${v}" ${S.closeAction === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select>
+    </div>
+    <div class="row">
+      <div class="grow"><h4>Desktop view shows</h4><p>For Oculus games that mirror one eye to the desktop window, like Echo VR. The headset isn't affected.</p></div>
+      <select class="input" id="mirroreye" style="width:200px">
+        ${[['left', 'Left eye'], ['right', 'Right eye']].map(([v, l]) => `<option value="${v}" ${S.mirrorEye === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
     </div></div>
   </div>`;
 }
@@ -317,7 +323,7 @@ function pageSig() {
     case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
-    case 'settings': return JSON.stringify([S.autostart, S.closeAction]);
+    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
@@ -368,6 +374,7 @@ document.addEventListener('input', (e) => { if (e.target.id === 'q') { ui.search
 document.addEventListener('change', (e) => {
   if (e.target.id === 'mode') send('setMode', { id: ui.selected, mode: e.target.value });
   if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
+  if (e.target.id === 'mirroreye') send('setMirrorEye', { value: e.target.value });
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.selected) { ui.selected = null; render(); }

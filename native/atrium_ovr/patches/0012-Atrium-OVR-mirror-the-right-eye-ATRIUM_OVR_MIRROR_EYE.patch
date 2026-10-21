@@ -1,0 +1,109 @@
+Atrium OVR: ATRIUM_OVR_MIRROR_EYE=right swaps the eyes the game sees, so a game that mirrors its
+first eye to the desktop (Echo VR) shows the right eye there. Submission swaps the views back.
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index f664e6e..47ed464 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -60,6 +60,25 @@ static const AtriumRiftUsb& AtriumRiftUsbInfo()
+ 	return info;
+ }
+ 
++// Atrium OVR: ATRIUM_OVR_MIRROR_EYE=right swaps the eyes the game sees. Games that mirror their
++// first eye to the desktop window (Echo VR copies the left half of its eye texture) then show the
++// right eye there; frame submission swaps the views back, so the headset is unchanged and nothing
++// extra is drawn.
++static bool AtriumMirrorRight()
++{
++	static const bool right = [] {
++		char v[16] = {};
++		return GetEnvironmentVariableA("ATRIUM_OVR_MIRROR_EYE", v, sizeof(v)) && _stricmp(v, "right") == 0;
++	}();
++	return right;
++}
++
++// The runtime's eye for the game's eye (and back: the swap is its own inverse).
++static int AtriumEye(int eye)
++{
++	return AtriumMirrorRight() && (eye == ovrEye_Left || eye == ovrEye_Right) ? ovrEye_Right - eye : eye;
++}
++
+ static bool AtriumIsRift(ovrSession session)
+ {
+ 	const char* name = session ? session->SystemProperties.systemName : "";
+@@ -228,13 +247,14 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
+ 		// Compensate for the 3-DOF eye pose on pre-1.17
+ 		if (Runtime::Get().MinorVersion < 17)
+ 		{
+-			desc.DefaultEyeFov[i] = OVR::FovPort::Uncant(XR::FovPort(session->ViewPoses[i].fov), XR::Quatf(session->ViewPoses[i].pose.orientation));
++			const int e = AtriumEye(i);
++			desc.DefaultEyeFov[i] = OVR::FovPort::Uncant(XR::FovPort(session->ViewPoses[e].fov), XR::Quatf(session->ViewPoses[e].pose.orientation));
+ 			desc.MaxEyeFov[i] = desc.DefaultEyeFov[i];
+ 		}
+ 		else
+ 		{
+-			desc.DefaultEyeFov[i] = XR::FovPort(session->ViewFov[i].recommendedFov);
+-			desc.MaxEyeFov[i] = XR::FovPort(session->ViewFov[i].maxMutableFov);
++			desc.DefaultEyeFov[i] = XR::FovPort(session->ViewFov[AtriumEye(i)].recommendedFov);
++			desc.MaxEyeFov[i] = XR::FovPort(session->ViewFov[AtriumEye(i)].maxMutableFov);
+ 		}
+ 		desc.Resolution.w += (int)session->ViewConfigs[i].recommendedImageRectWidth;
+ 		desc.Resolution.h = std::max(desc.Resolution.h, (int)session->ViewConfigs[i].recommendedImageRectHeight);
+@@ -926,8 +946,8 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
+ 	// always gave full size, so games set below 1.0 rendered far more pixels than on Oculus's runtime.
+ 	const float scale = pixelsPerDisplayPixel > 0.0f ? pixelsPerDisplayPixel : 1.0f;
+ 	ovrSizei size = {
+-		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan) * scale),
+-		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan) * scale),
++		(int)(session->PixelsPerTan[AtriumEye(eye)].x * (fov.LeftTan + fov.RightTan) * scale),
++		(int)(session->PixelsPerTan[AtriumEye(eye)].y * (fov.UpTan + fov.DownTan) * scale),
+ 	};
+ 	AtriumOvrLog("ovr_GetFovTextureSize eye %d: fov tan L%.3f R%.3f U%.3f D%.3f, pixelsPerDisplayPixel %.3f -> %dx%d",
+ 		(int)eye, fov.LeftTan, fov.RightTan, fov.UpTan, fov.DownTan, pixelsPerDisplayPixel, size.w, size.h);
+@@ -948,8 +968,8 @@ OVR_PUBLIC_FUNCTION(ovrEyeRenderDesc) ovr_GetRenderDesc2(ovrSession session, ovr
+ 
+ 	desc.DistortedViewport.Size.w = session->ViewConfigs[eyeType].recommendedImageRectWidth;
+ 	desc.DistortedViewport.Size.h = session->ViewConfigs[eyeType].recommendedImageRectHeight;
+-	desc.PixelsPerTanAngleAtCenter = session->PixelsPerTan[eyeType];
+-	desc.HmdToEyePose = XR::Posef(session->ViewPoses[eyeType].pose);
++	desc.PixelsPerTanAngleAtCenter = session->PixelsPerTan[AtriumEye(eyeType)];
++	desc.HmdToEyePose = XR::Posef(session->ViewPoses[AtriumEye(eyeType)].pose);
+ 	return desc;
+ }
+ 
+@@ -1119,7 +1139,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 				if (!texture)
+ 					break;
+ 
+-				XrCompositionLayerProjectionView& view = viewData.back().Views[i];
++				XrCompositionLayerProjectionView& view = viewData.back().Views[AtriumEye(i)];
+ 				view = XR_TYPE(COMPOSITION_LAYER_PROJECTION_VIEW);
+ 
+ 				if (type == ovrLayerType_EyeMatrix)
+@@ -1188,7 +1208,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 				if (cropFov && type != ovrLayerType_EyeMatrix)
+ 				{
+ 					const XR::FovPort rendered(layer->EyeFov.Fov[i]);
+-					const XR::FovPort limit(session->ViewFov[i].maxMutableFov);
++					const XR::FovPort limit(session->ViewFov[AtriumEye(i)].maxMutableFov);
+ 					XR::FovPort shown = rendered;
+ 					shown.LeftTan = std::min(rendered.LeftTan, limit.LeftTan);
+ 					shown.RightTan = std::min(rendered.RightTan, limit.RightTan);
+@@ -1696,7 +1716,7 @@ ovr_GetFovStencil(
+ 
+ 	XrVisibilityMaskTypeKHR type = std::min((XrVisibilityMaskTypeKHR)(fovStencilDesc->StencilType + 1),
+ 		XR_VISIBILITY_MASK_TYPE_LINE_LOOP_KHR);
+-	const VisibilityMask& mask = session->VisibilityMasks[fovStencilDesc->Eye][type];
++	const VisibilityMask& mask = session->VisibilityMasks[AtriumEye(fovStencilDesc->Eye)][type];
+ 
+ 	// Some runtime advertise support for the extension, but don't always return valid masks
+ 	if (mask.first.empty() || mask.second.empty())
+@@ -1749,7 +1769,7 @@ ovr_GetFovStencil(
+ 	}
+ 
+ 	OVR::ScaleAndOffset2D scaleAndOffset = OVR::FovPort::CreateNDCScaleAndOffsetFromFov(
+-		XR::FovPort(session->ViewFov[fovStencilDesc->Eye].recommendedFov));
++		XR::FovPort(session->ViewFov[AtriumEye(fovStencilDesc->Eye)].recommendedFov));
+ 
+ 	// Visibility masks are in view space at z=-1, so we need to construct
+ 	// a right-handed 2D projection matrix to project the mask to NDC space

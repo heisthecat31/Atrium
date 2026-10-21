@@ -216,6 +216,9 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
     %APPDATA%\Atrium\ovr_fov_cache.txt; 2 s READY wait), 0010 real headset description,
     0011 Rift Sensors + serial from USB. User confirmed in Echo 2026-10-21: CV1 seen, sensors
     shown, no per-launch delay, 2nd launch displays correctly. Sensor poses are still virtual.
+    0012 desktop view eye: ATRIUM_OVR_MIRROR_EYE=right (Settings > "Desktop view shows") swaps
+    the eyes the game sees (FOV, eye pose, stencil, texture size) and swaps the views back on
+    submit. Echo mirrors its first eye itself (no ovr mirror texture), so this shows the right eye.
   - Open: games Steam starts can only reach the Atrium Runtime if it's registered system-wide
     (Runtime page button, UAC); Atrium Runtime is Windows-only so far; no-Meta-installed case for
     signed-shim games; LibOVRPlatform stand-in.

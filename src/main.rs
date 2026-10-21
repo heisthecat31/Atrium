@@ -21,7 +21,7 @@ fn main() {
             services::runtime::write_backend(&st);
             // ATRIUM_XR=<manifest.json> picks the OpenXR runtime for this run (testing backends).
             let xr = std::env::var_os("ATRIUM_XR").map(std::path::PathBuf::from).or_else(|| services::launcher::xr_runtime(Some(&st)));
-            match services::launcher::translated(&exe, &args[3..], xr.as_deref()) {
+            match services::launcher::translated(&exe, &args[3..], xr.as_deref(), None) {
                 Ok(pid) => println!("started {} (pid {pid}) on {}", exe.display(), xr.map(|p| p.display().to_string()).unwrap_or("the active OpenXR runtime".into())),
                 Err(e) => {
                     eprintln!("{e}");

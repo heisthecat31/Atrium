@@ -17,6 +17,8 @@ pub struct Settings {
     pub vr_only: Option<bool>,
     /// What closing the window does: "tray" or "quit"; None = ask each time.
     pub close_action: Option<String>,
+    /// Which eye Oculus SDK games show on the desktop: "right"; None = the game's own (left).
+    pub mirror_eye: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

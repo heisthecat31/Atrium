@@ -58,9 +58,10 @@ int main(int argc, char** argv) {
     for (int e = 0; e < 2; e++) {
         ovrFovPort f = d.DefaultEyeFov[e];
         ovrSizei tex = ovr_GetFovTextureSize(s, (ovrEyeType)e, f, 1.0f);
-        printf("%s eye FOV  up %.1f down %.1f left %.1f right %.1f  (h %.1f, v %.1f) tex %dx%d\n", e ? "Right" : "Left ",
+        ovrEyeRenderDesc rd = ovr_GetRenderDesc(s, (ovrEyeType)e, f);
+        printf("%s eye FOV  up %.1f down %.1f left %.1f right %.1f  (h %.1f, v %.1f) tex %dx%d, offset x %+.4f m\n", e ? "Right" : "Left ",
                Deg(f.UpTan), Deg(f.DownTan), Deg(f.LeftTan), Deg(f.RightTan),
-               Deg(f.LeftTan) + Deg(f.RightTan), Deg(f.UpTan) + Deg(f.DownTan), tex.w, tex.h);
+               Deg(f.LeftTan) + Deg(f.RightTan), Deg(f.UpTan) + Deg(f.DownTan), tex.w, tex.h, rd.HmdToEyePose.Position.x);
     }
     unsigned int ct = ovr_GetConnectedControllerTypes(s);
     printf("Controllers   0x%x%s%s\n", ct, (ct & ovrControllerType_LTouch) ? " LTouch" : "", (ct & ovrControllerType_RTouch) ? " RTouch" : "");

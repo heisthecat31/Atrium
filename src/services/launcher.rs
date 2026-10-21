@@ -74,12 +74,18 @@ pub fn mode(game: &Game, settings: &Settings, _rt: Option<&RuntimeState>) -> Mod
 /// LoadLibrary hook returns itself. Older games (no signature check) also find it through
 /// LIBOVR_DLL_DIR. Its folder must not go first on PATH: the SDK's loader would find the
 /// unsigned copy there and stop looking.
-pub fn translated(exe: &Path, args: &[String], xr: Option<&Path>) -> Result<u32, String> {
+///
+/// `mirror_eye` "right" has Atrium OVR swap the eyes the game sees, so a game that mirrors its first
+/// eye to the desktop (Echo VR) shows the right one; the headset is unchanged.
+pub fn translated(exe: &Path, args: &[String], xr: Option<&Path>, mirror_eye: Option<&str>) -> Result<u32, String> {
     let ovr = ovr_dir().ok_or("Atrium OVR isn't built (native\\build.bat)")?;
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut env: Vec<(&str, &std::ffi::OsStr)> = vec![("LIBOVR_DLL_DIR", ovr.as_os_str())];
     if let Some(m) = xr {
         env.push(("XR_RUNTIME_JSON", m.as_os_str()));
+    }
+    if let Some(eye) = mirror_eye {
+        env.push(("ATRIUM_OVR_MIRROR_EYE", std::ffi::OsStr::new(eye)));
     }
     #[cfg(windows)]
     {
@@ -131,7 +137,7 @@ pub fn launch(game: &Game, settings: &mut Settings, rt: Option<&RuntimeState>) -
         }
         Mode::Translate => {
             let exe = game.exe.as_ref().ok_or("No executable known for this game")?;
-            translated(exe, &split_args(&game.args), xr_runtime(rt).as_deref())?;
+            translated(exe, &split_args(&game.args), xr_runtime(rt).as_deref(), settings.mirror_eye.as_deref())?;
         }
     }
     settings.plays.insert(game.id.clone(), sys::now_ms());

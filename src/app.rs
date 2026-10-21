@@ -102,6 +102,7 @@ impl App {
             "vrOnly": set.vr_only.unwrap_or(true),
             "autostart": sys::autostart::enabled(),
             "closeAction": set.close_action.clone().unwrap_or_else(|| "ask".into()),
+            "mirrorEye": set.mirror_eye.clone().unwrap_or_else(|| "left".into()),
             "ovr": launcher::ovr_dir(),
             "modes": set.game_options.iter().map(|(k, v)| (k.clone(), json!(v.mode))).collect::<serde_json::Map<_, _>>(),
             "starts": starts,
@@ -359,6 +360,14 @@ impl App {
                 let v = arg("value");
                 let mut s = self.st();
                 s.settings.close_action = matches!(v.as_str(), "tray" | "quit").then_some(v);
+                s.settings.save();
+                drop(s);
+                self.push();
+            }
+            "setMirrorEye" => {
+                let v = arg("value");
+                let mut s = self.st();
+                s.settings.mirror_eye = (v == "right").then_some(v);
                 s.settings.save();
                 drop(s);
                 self.push();
