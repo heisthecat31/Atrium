@@ -1,0 +1,42 @@
+Atrium OVR: ovr_GetHmdDesc describes the headset the runtime reports (Rift CV1, Rift S, Quest)
+instead of always "Oculus Rift S".
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index 050da18..9e2bdc8 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -142,8 +142,32 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
+ 	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
+ 	xrGetInstanceProperties(session->Instance, &props);
+ 
+-	strcpy_s(desc.ProductName, 64, "Oculus Rift S");
+-	strcpy_s(desc.Manufacturer, 64, props.runtimeName);
++	// Atrium OVR: describe the headset the runtime actually reports (Revive always said
++	// "Oculus Rift S"). Types newer than the game's SDK fall back to the Rift CV1.
++	const char* name = session->SystemProperties.systemName;
++	if (strstr(name, "Rift S"))
++	{
++		desc.Type = Runtime::Get().MinorVersion < 38 ? ovrHmd_CV1 : ovrHmd_RiftS;
++		strcpy_s(desc.ProductName, 64, "Oculus Rift S");
++		strcpy_s(desc.Manufacturer, 64, "Oculus VR");
++	}
++	else if (strstr(name, "Rift") || strstr(name, "CV1"))
++	{
++		desc.Type = ovrHmd_CV1;
++		strcpy_s(desc.ProductName, 64, "Oculus Rift");
++		strcpy_s(desc.Manufacturer, 64, "Oculus VR");
++	}
++	else if (strstr(name, "Quest"))
++	{
++		desc.Type = Runtime::Get().MinorVersion < 46 ? ovrHmd_CV1 : ovrHmd_Quest2;
++		strcpy_s(desc.ProductName, 64, name);
++		strcpy_s(desc.Manufacturer, 64, "Oculus VR");
++	}
++	else
++	{
++		strcpy_s(desc.ProductName, 64, name[0] ? name : "Oculus Rift S");
++		strcpy_s(desc.Manufacturer, 64, props.runtimeName);
++	}
+ 
+ 	if (session->SystemProperties.trackingProperties.orientationTracking)
+ 		desc.AvailableTrackingCaps |= ovrTrackingCap_Orientation;

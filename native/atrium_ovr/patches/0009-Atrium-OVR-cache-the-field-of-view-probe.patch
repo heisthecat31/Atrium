@@ -1,0 +1,167 @@
+Atrium OVR: cache the field-of-view probe (per-eye FOV and eye poses, stage bounds) per runtime +
+headset in %APPDATA%\Atrium\ovr_fov_cache.txt so later launches skip it, and wait 2 s instead of
+10 s for READY (Meta only signals READY once the headset is worn; its views are valid before).
+
+diff --git a/ReviveXR/Session.cpp b/ReviveXR/Session.cpp
+index 6dda118..b246ec5 100644
+--- a/ReviveXR/Session.cpp
++++ b/ReviveXR/Session.cpp
+@@ -12,6 +12,95 @@
+ #include <openxr/openxr_platform.h>
+ #include <wrl/client.h>
+ #include <thread>
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++// Atrium OVR: the field-of-view probe opens a session and (on Meta's runtime) waits for READY,
++// which only comes once the headset is worn. Its result is cached per runtime + headset in
++// %APPDATA%\Atrium\ovr_fov_cache.txt so later launches skip the probe.
++static void AtriumFovCachePath(char* out, size_t size)
++{
++	const char* appdata = getenv("APPDATA");
++	snprintf(out, size, "%s\\Atrium\\ovr_fov_cache.txt", appdata ? appdata : ".");
++}
++
++// One line per runtime + headset: key, then per eye the FOV (4) and the eye pose relative to the
++// head (orientation xyzw, position xyz: the IPD lives here), then the stage bounds.
++static bool AtriumFovCacheLoad(const char* key, XrFovf fov[2], XrPosef pose[2], XrExtent2Df* bounds)
++{
++	char path[MAX_PATH];
++	AtriumFovCachePath(path, sizeof(path));
++	FILE* f = nullptr;
++	if (fopen_s(&f, path, "r") != 0 || !f)
++		return false;
++	char line[1024];
++	bool found = false;
++	while (!found && fgets(line, sizeof(line), f))
++	{
++		char* tab = strchr(line, '\t');
++		if (!tab)
++			continue;
++		*tab = 0;
++		if (strcmp(line, key) != 0)
++			continue;
++		int n = 0;
++		const char* p = tab + 1;
++		float v[24];
++		while (n < 24)
++		{
++			char* end = nullptr;
++			v[n] = strtof(p, &end);
++			if (end == p)
++				break;
++			p = end;
++			n++;
++		}
++		if (n != 24)
++			continue; // an older line without eye poses: probe again
++		for (int i = 0; i < 2; i++)
++		{
++			const float* e = v + i * 11;
++			fov[i] = { e[0], e[1], e[2], e[3] };
++			pose[i].orientation = { e[4], e[5], e[6], e[7] };
++			pose[i].position = { e[8], e[9], e[10] };
++		}
++		bounds->width = v[22];
++		bounds->height = v[23];
++		found = true;
++	}
++	fclose(f);
++	return found;
++}
++
++static void AtriumFovCacheSave(const char* key, const XrFovf fov[2], const XrPosef pose[2], const XrExtent2Df& bounds)
++{
++	char path[MAX_PATH];
++	AtriumFovCachePath(path, sizeof(path));
++	// Keep other headsets' lines, replace this one.
++	std::string kept;
++	FILE* f = nullptr;
++	if (fopen_s(&f, path, "r") == 0 && f)
++	{
++		char line[1024];
++		size_t keylen = strlen(key);
++		while (fgets(line, sizeof(line), f))
++			if (!(strncmp(line, key, keylen) == 0 && line[keylen] == '\t'))
++				kept += line;
++		fclose(f);
++	}
++	if (fopen_s(&f, path, "w") != 0 || !f)
++		return;
++	fputs(kept.c_str(), f);
++	fprintf(f, "%s\t", key);
++	for (int i = 0; i < 2; i++)
++		fprintf(f, "%f %f %f %f %f %f %f %f %f %f %f ", fov[i].angleLeft, fov[i].angleRight, fov[i].angleUp,
++			fov[i].angleDown, pose[i].orientation.x, pose[i].orientation.y, pose[i].orientation.z,
++			pose[i].orientation.w, pose[i].position.x, pose[i].position.y, pose[i].position.z);
++	fprintf(f, "%f %f\n", bounds.width, bounds.height);
++	fclose(f);
++}
+ 
+ using namespace std::chrono_literals;
+ 
+@@ -67,6 +156,31 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 			ViewPoses[i].pose = XR::Posef::Identity();
+ 		}
+ 	}
++	// Atrium OVR: a cached probe result for this runtime + headset skips the probe session.
++	char atriumFovKey[XR_MAX_RUNTIME_NAME_SIZE + XR_MAX_SYSTEM_NAME_SIZE + 2] = "";
++	XrFovf atriumCachedFov[2] = {};
++	XrPosef atriumCachedPose[2] = {};
++	bool atriumFovCached = false;
++	{
++		XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
++		xrGetInstanceProperties(Instance, &props);
++		snprintf(atriumFovKey, sizeof(atriumFovKey), "%s|%s", props.runtimeName, SystemProperties.systemName);
++	}
++	if (!(Runtime::Get().MinorVersion >= 17 && Runtime::Get().Supports(XR_EPIC_VIEW_CONFIGURATION_FOV_EXTENSION_NAME) &&
++		!Runtime::Get().UseHack(Runtime::HACK_FORCE_FOV_FALLBACK)))
++		atriumFovCached = AtriumFovCacheLoad(atriumFovKey, atriumCachedFov, atriumCachedPose, &bounds);
++
++	if (atriumFovCached)
++	{
++		for (int i = 0; i < ovrEye_Count; i++)
++		{
++			ViewPoses[i].fov = atriumCachedFov[i];
++			ViewPoses[i].pose = atriumCachedPose[i]; // per-eye offset (IPD), as the probe measured it
++			ViewFov[i].recommendedFov = atriumCachedFov[i];
++			ViewFov[i].maxMutableFov = atriumCachedFov[i];
++		}
++		AtriumOvrLog("field-of-view: cached for %s", atriumFovKey);
++	}
+ 	else if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory)))
+ 	{
+ 		Microsoft::WRL::ComPtr<IDXGIAdapter1> pAdapter;
+@@ -98,7 +212,8 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 			XrEventDataBuffer event;
+ 			const XrEventDataSessionStateChanged& stateChanged =
+ 				reinterpret_cast<XrEventDataSessionStateChanged&>(event);
+-			const auto deadline = std::chrono::steady_clock::now() + 10s;
++			// Meta's runtime returns valid views before READY too: wait briefly, not 10 s.
++			const auto deadline = std::chrono::steady_clock::now() + 2s;
+ 			bool ready = false;
+ 			while (!ready && std::chrono::steady_clock::now() < deadline)
+ 			{
+@@ -128,6 +243,20 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 
+ 		CHK_XR(xrGetReferenceSpaceBoundsRect(Session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds));
+ 		CHK_OVR(DestroySession());
++
++		// Cache a plausible result (both eyes have a real field of view).
++		XrFovf probed[2] = { ViewFov[0].recommendedFov, ViewFov[1].recommendedFov };
++		bool valid = true;
++		for (int i = 0; i < ovrEye_Count; i++)
++			valid = valid && probed[i].angleRight - probed[i].angleLeft > 0.5f && probed[i].angleUp - probed[i].angleDown > 0.5f;
++		// ...and the eyes are apart (an unready runtime can report both at the centre).
++		valid = valid && fabsf(ViewPoses[1].pose.position.x - ViewPoses[0].pose.position.x) > 0.03f;
++		if (valid)
++		{
++			XrPosef poses[2] = { ViewPoses[0].pose, ViewPoses[1].pose };
++			AtriumFovCacheSave(atriumFovKey, probed, poses, bounds);
++			AtriumOvrLog("field-of-view: probed and cached for %s", atriumFovKey);
++		}
+ 	}
+ 
+ 	// Calculate the pixels per tan angle

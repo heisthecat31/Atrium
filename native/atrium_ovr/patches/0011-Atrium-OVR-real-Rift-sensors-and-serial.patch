@@ -1,0 +1,83 @@
+Atrium OVR: a Rift reports its real sensors (Rift Sensors on USB, up to 3) and its USB vendor,
+product and serial, read with SetupAPI; OpenXR has no notion of either. Sensor poses stay virtual.
+
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index 9e2bdc8..f664e6e 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -20,6 +20,51 @@
+ #include <thread>
+ #include <chrono>
+ #include <detours/detours.h>
++#include <SetupAPI.h>
++#include <string>
++#pragma comment(lib, "setupapi.lib")
++
++// Atrium OVR: what Windows sees of a Rift on USB. OpenXR has no notion of the Rift's external
++// sensors or the headset's serial, so they're read from the USB devices (once per process).
++struct AtriumRiftUsb
++{
++	unsigned int sensors = 0;   // Rift Sensors (VID 2833 PID 0211)
++	char serial[24] = "";       // the headset's USB serial (VID 2833 PID 0031)
++};
++
++static const AtriumRiftUsb& AtriumRiftUsbInfo()
++{
++	static AtriumRiftUsb info;
++	static bool done = false;
++	if (done)
++		return info;
++	done = true;
++	HDEVINFO set = SetupDiGetClassDevsA(nullptr, "USB", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
++	if (set == INVALID_HANDLE_VALUE)
++		return info;
++	SP_DEVINFO_DATA dev = { sizeof(SP_DEVINFO_DATA) };
++	char id[512];
++	for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &dev); i++)
++	{
++		if (!SetupDiGetDeviceInstanceIdA(set, &dev, id, sizeof(id), nullptr))
++			continue;
++		std::string s(id);
++		if (s.find("&MI_") != std::string::npos)
++			continue; // one entry per physical device (its composite parent)
++		if (s.find("VID_2833&PID_0211") != std::string::npos)
++			info.sensors++;
++		else if (s.find("VID_2833&PID_0031") != std::string::npos)
++			strncpy_s(info.serial, s.substr(s.rfind('\\') + 1).c_str(), _TRUNCATE);
++	}
++	SetupDiDestroyDeviceInfoList(set);
++	return info;
++}
++
++static bool AtriumIsRift(ovrSession session)
++{
++	const char* name = session ? session->SystemProperties.systemName : "";
++	return strstr(name, "Rift") || strstr(name, "CV1");
++}
+ 
+ XrInstance g_Instance = XR_NULL_HANDLE;
+ std::list<ovrHmdStruct> g_Sessions;
+@@ -156,6 +201,9 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
+ 		desc.Type = ovrHmd_CV1;
+ 		strcpy_s(desc.ProductName, 64, "Oculus Rift");
+ 		strcpy_s(desc.Manufacturer, 64, "Oculus VR");
++		desc.VendorId = 0x2833;
++		desc.ProductId = 0x0031;
++		strcpy_s(desc.SerialNumber, sizeof(desc.SerialNumber), AtriumRiftUsbInfo().serial);
+ 	}
+ 	else if (strstr(name, "Quest"))
+ 	{
+@@ -205,7 +253,12 @@ OVR_PUBLIC_FUNCTION(unsigned int) ovr_GetTrackerCount(ovrSession session)
+ 		return ovrError_InvalidSession;
+ 
+ 	// Pre-1.37 applications need virtual sensors to avoid a loss of tracking being detected
+-	return Runtime::Get().MinorVersion < 37 ? 3 : 0;
++	if (Runtime::Get().MinorVersion < 37)
++		return 3;
++	// Atrium OVR: a Rift reports the sensors actually plugged in (up to the 3 poses below).
++	if (AtriumIsRift(session))
++		return std::min(AtriumRiftUsbInfo().sensors, 3u);
++	return 0;
+ }
+ 
+ OVR_PUBLIC_FUNCTION(ovrTrackerDesc) ovr_GetTrackerDesc(ovrSession session, unsigned int trackerDescIndex)

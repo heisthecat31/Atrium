@@ -291,18 +291,22 @@ impl App {
                         }
                         let wired = cfg!(windows) && app.st().hw.as_ref().is_some_and(meta_runtime::needed);
                         if g.installed && wired {
-                            if !meta_runtime::running() {
+                            let starting = !meta_runtime::running();
+                            if starting {
                                 app.notice("Starting the headset…");
                             }
                             meta_runtime::prepare()?;
                             // Starting OVRServer powers the Rift up and it drops off USB for a
                             // moment; a hardware pass in that gap picks the wrong backend. Pick
-                            // again now that Meta's runtime reports the headset.
-                            let hw = headsets::detect();
-                            let st = rt::state(&hw);
-                            let mut s = app.st();
-                            s.hw = Some(hw);
-                            s.rt = Some(st);
+                            // again now that Meta's runtime reports the headset (only needed when
+                            // it was just started: otherwise the hardware loop's state is current).
+                            if starting {
+                                let hw = headsets::detect();
+                                let st = rt::state(&hw);
+                                let mut s = app.st();
+                                s.hw = Some(hw);
+                                s.rt = Some(st);
+                            }
                         }
                         let mut guard = app.st();
                         let s = &mut *guard;
