@@ -61,6 +61,12 @@ pub struct Game {
     /// "openxr" | "openvr" | "oculus"
     pub vr_api: Option<&'static str>,
     pub art: Art,
+    /// Installed version, when known (Meta games Atrium downloaded).
+    pub version: String,
+    /// Atrium downloaded it (Meta), so Atrium can switch its version or remove it.
+    pub downloaded: bool,
+    /// Versions Atrium has downloaded, newest first (`version` is the one Play starts).
+    pub versions: Vec<String>,
 }
 
 /// What the accounts own, fetched by `refresh_owned`. Kept between scans so a rescan of the disk
@@ -112,6 +118,32 @@ pub fn scan(settings: &Settings, owned: &Owned) -> Vec<Game> {
         g.owned = owned.meta.iter().any(|(id, ..)| *id == g.app_id);
         games.insert(g.id.clone(), g);
     }
+    // Downloaded by Atrium: these win over a Meta-app copy (the user picked this version).
+    for (id, i) in &settings.meta_installs {
+        let Some(v) = i.current() else { continue };
+        let dir = PathBuf::from(&v.dir);
+        let exe = dir.join(&v.launch_file);
+        games.insert(format!("meta:{id}"), Game {
+            id: format!("meta:{id}"),
+            source: Source::Meta,
+            name: i.name.clone(),
+            app_id: id.clone(),
+            installed: !v.launch_file.is_empty() && exe.exists(),
+            exe: Some(exe),
+            install_dir: Some(dir),
+            args: v.launch_args.clone(),
+            vr: true,
+            vr_known: true,
+            vr_api: Some("oculus"),
+            art: meta::local_art(&i.canonical),
+            canonical: i.canonical.clone(),
+            owned: owned.meta.iter().any(|(o, ..)| o == id),
+            version: i.active.clone(),
+            versions: i.sorted().into_iter().map(|(k, _)| k.clone()).collect(),
+            downloaded: true,
+            ..Default::default()
+        });
+    }
     for (id, name, canonical) in &owned.meta {
         let g = games.entry(format!("meta:{id}")).or_insert_with(|| Game {
             id: format!("meta:{id}"),
@@ -124,7 +156,9 @@ pub fn scan(settings: &Settings, owned: &Owned) -> Vec<Game> {
             ..Default::default()
         });
         g.owned = true;
-        g.name = name.clone();
+        if !g.downloaded {
+            g.name = name.clone();
+        }
     }
     for g in games.values_mut().filter(|g| g.source == Source::Meta) {
         g.vr_only = true;

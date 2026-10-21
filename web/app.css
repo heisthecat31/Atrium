@@ -281,3 +281,13 @@ select.input { padding-right: 30px; cursor: pointer; }
 .modal p { margin: 0 0 14px; color: var(--muted); line-height: 1.5; }
 .modal .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; cursor: pointer; margin-bottom: 18px; }
 .modal .row { display: flex; justify-content: flex-end; gap: 10px; }
+
+/* Meta downloads: progress and the versions list */
+.meter { height: 6px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width .3s; }
+.meter.thin { height: 3px; margin-top: 6px; }
+.versions { display: flex; flex-direction: column; gap: 6px; }
+.ver { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 10px; background: rgba(255,255,255,.04); }
+.ver.on { background: rgba(79,214,156,.08); }
+.ver .grow, .field .row .grow { flex: 1; min-width: 0; }
+.field .row { display: flex; gap: 8px; align-items: center; }

@@ -3,7 +3,7 @@
 import { headsetIcons, icon } from './icons.js';
 
 let S = null;
-const ui = { page: 'library', selected: null, search: '', source: 'all' };
+const ui = { page: 'library', selected: null, search: '', source: 'all', version: {}, confirmRemove: null };
 const drawn = { page: null, sig: null, side: null, drawer: null };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -88,7 +88,8 @@ function card(g) {
       ${g.installed ? `<button class="play" data-play="${esc(g.id)}" title="Play">${icon.play}</button>` : ''}
     </div>
     <div class="name" title="${esc(g.name)}">${esc(g.name)}</div>
-    <div class="sub">${g.installed ? (g.lastPlayed || g.last_played ? ago(g.last_played) : 'Installed') : 'Not installed'}</div>
+    <div class="sub" ${S.downloads[g.app_id] && g.source === 'meta' ? `data-dl-sub="${esc(g.app_id)}"` : ''}>${S.downloads[g.app_id] && g.source === 'meta' ? dlSub(S.downloads[g.app_id]) : g.installed ? (g.lastPlayed || g.last_played ? ago(g.last_played) : 'Installed') : 'Not installed'}</div>
+    ${S.downloads[g.app_id] && g.source === 'meta' ? `<div class="meter thin"><i data-dl-bar="${esc(g.app_id)}" style="width:${pct(S.downloads[g.app_id])}%"></i></div>` : ''}
   </div>`;
 }
 
@@ -143,14 +144,69 @@ function libraryBody() {
   $('#lib').innerHTML = html;
 }
 
+// ---- Meta downloads -----------------------------------------------------------------------
+// The build the download picker shows for a game: the user's pick, else the newest one not
+// downloaded yet (else the newest).
+function latest(g) {
+  const b = S.versions[g.app_id]?.builds;
+  if (!b?.length) return null;
+  return b.find((x) => x.binary_id === ui.version[g.app_id]) || b.find((x) => !g.versions.includes(x.version)) || b[0];
+}
+
+const pct = (p) => (p.total ? Math.min(100, Math.floor((p.done / p.total) * 100)) : 0);
+const dlSub = (p) => `Downloading ${pct(p)}%`;
+const dlHint = (p) => `${p.phase}${p.total ? ` · ${size(p.done)} of ${size(p.total)} (${pct(p)}%)` : ''}`;
+
+// Progress ticks arrive a few times a second: update the bars and text in place (redrawing the
+// library or the drawer each time reloads their images, which flickers).
+function paintDownloads() {
+  for (const [id, p] of Object.entries(S.downloads)) {
+    const q = (attr) => document.querySelectorAll(`[${attr}="${CSS.escape(id)}"]`);
+    q('data-dl-bar').forEach((el) => { el.style.width = `${pct(p)}%`; });
+    q('data-dl-sub').forEach((el) => { el.textContent = dlSub(p); });
+    q('data-dl-hint').forEach((el) => { el.textContent = dlHint(p); });
+  }
+}
+
+function versionField(g, dl) {
+  const v = S.versions[g.app_id];
+  // Downloaded versions: one is played, any other is a click away; each can be removed.
+  const mine = g.versions.length ? `<div class="field"><label>Your versions</label><div class="versions">${g.versions.map((ver) => {
+    const key = `${g.app_id}|${ver}`;
+    const playing = ver === g.version;
+    return `<div class="ver ${playing ? 'on' : ''}"><span class="grow mono">${esc(ver)}</span>
+      ${playing ? '<span class="pill good">Plays</span>' : `<button class="btn" data-use-version="${esc(ver)}" ${dl ? 'disabled' : ''}>Use this version</button>`}
+      <button class="btn ghost danger" data-remove-dl="${esc(key)}" ${dl ? 'disabled' : ''}>${ui.confirmRemove === key ? 'Delete its files?' : 'Remove'}</button></div>`;
+  }).join('')}</div><div class="hint">Each version has its own folder; switching is instant. Play starts the one marked Plays.</div></div>` : '';
+  if (dl) {
+    return mine + `<div class="field"><label>Downloading ${esc(dl.version)}</label>
+      <div class="meter"><i data-dl-bar="${esc(g.app_id)}" style="width:${pct(dl)}%"></i></div>
+      <div class="hint" data-dl-hint="${esc(g.app_id)}">${esc(dlHint(dl))}</div>
+      <div class="row" style="margin-top:10px"><button class="btn" data-cancel-dl="${esc(g.app_id)}">Stop</button></div></div>`;
+  }
+  if (!v) return mine + `<div class="field"><label>Download a version</label><div class="hint">Asking Meta for versions…</div></div>`;
+  if (v.error) return mine + `<div class="field"><label>Download a version</label><div class="hint">${esc(v.error)}</div></div>`;
+  const pick = latest(g);
+  const have = g.versions.includes(pick.version);
+  const label = (b, i) => `${b.version}${i === 0 ? ' (latest)' : ''}${g.versions.includes(b.version) ? ' · downloaded' : ''}`;
+  return mine + `<div class="field"><label>Download a version</label>
+    <div class="row"><select class="input grow" id="version">${v.builds.map((b, i) => `<option value="${esc(b.binary_id)}" ${b.binary_id === pick.binary_id ? 'selected' : ''}>${esc(label(b, i))}</option>`).join('')}</select>
+    <button class="btn primary" data-download="${esc(g.app_id)}" ${have ? 'disabled' : ''}>${icon.download}${have ? 'Downloaded' : 'Download'}</button></div>
+    <div class="hint">${v.builds.length} versions from Meta. ${g.versions.length ? 'Pieces your other versions already have are copied, not downloaded again.' : `Saves to ${esc(S.downloadDir || 'a folder you pick (Settings)')}.`}</div></div>`;
+}
+
 // ---- drawer -------------------------------------------------------------------------------
 function renderDrawer() {
   const d = $('#drawer');
   const g = ui.selected && S?.games.find((x) => x.id === ui.selected);
-  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.ovr, S.busy.launching]) : null;
+  const sig = g ? JSON.stringify([g, S.modes[g.id], S.starts[g.id], S.ovr, S.busy.launching, S.versions[g.app_id], S.downloads[g.app_id]?.version, S.meta.length, ui.version[g.app_id], ui.confirmRemove]) : null;
   if (sig === drawn.drawer) return;
   drawn.drawer = sig;
   if (!g) { d.hidden = true; d.innerHTML = ''; return; }
+  // Meta games: Atrium downloads any version Meta still serves, with the signed-in account.
+  const downloadable = g.source === 'meta' && (g.owned || g.downloaded) && S.meta.length;
+  if (downloadable && !S.versions[g.app_id]) send('metaVersions', { appId: g.app_id });
+  const dl = S.downloads[g.app_id];
   const modes = [['auto', 'Automatic']];
   if (g.source === 'steam') modes.push(['steam', 'Through Steam']);
   if (g.exe) { modes.push(['direct', 'Directly']); if (S.ovr) modes.push(['translate', 'Through Atrium OVR (OpenXR)']); }
@@ -172,12 +228,14 @@ function renderDrawer() {
         <div class="actions">
           ${g.installed ? `<button class="btn primary big" data-play="${esc(g.id)}" ${S.busy.launching ? 'disabled' : ''}>${icon.play}${S.busy.launching === g.name ? 'Starting…' : 'Play'}</button>`
             : g.source === 'local' ? '<button class="btn big" disabled>File missing</button>'
+            : downloadable ? `<button class="btn primary big" data-download="${esc(g.app_id)}" ${dl || !latest(g) ? 'disabled' : ''}>${icon.download}${dl ? 'Downloading…' : latest(g) ? `Download ${esc(latest(g).version)}` : 'Download'}</button>`
             : `<button class="btn primary big" data-play="${esc(g.id)}">${g.source === 'steam' ? 'Install' : 'Get in Meta app'}</button>`}
           ${g.install_dir && g.installed ? `<button class="btn big icon-btn" data-folder="${esc(g.id)}" title="Open folder">${icon.folder}</button>` : ''}
         </div>
         ${g.installed ? `<div class="field"><label>Start</label>
           <select class="input" id="mode" style="width:100%">${modes.map(([k, l]) => `<option value="${k}" ${k === mode ? 'selected' : ''}>${l}</option>`).join('')}</select>
           <div class="hint">Will start: ${esc(S.starts[g.id] || '')}</div></div>` : ''}
+        ${downloadable ? versionField(g, dl) : ''}
         <div class="field"><label>Details</label><dl class="facts">
           <dt>Last played</dt><dd>${ago(g.last_played)}</dd>
           ${g.size ? `<dt>Size</dt><dd>${size(g.size)}</dd>` : ''}
@@ -309,6 +367,10 @@ function settings() {
       </select>
     </div>
     <div class="row">
+      <div class="grow"><h4>Downloads folder</h4><p class="mono">${esc(S.downloadDir || 'Not set: Atrium asks on your first download')}</p><p>Meta games Atrium downloads go here: a folder per game, and one inside it per version.</p></div>
+      <button class="btn" id="pickdl">${icon.folder}Change…</button>
+    </div>
+    <div class="row">
       <div class="grow"><h4>Desktop view shows</h4><p>For Oculus games that mirror one eye to the desktop window, like Echo VR. The headset isn't affected.</p></div>
       <select class="input" id="mirroreye" style="width:200px">
         ${[['left', 'Left eye'], ['right', 'Right eye']].map(([v, l]) => `<option value="${v}" ${S.mirrorEye === v ? 'selected' : ''}>${l}</option>`).join('')}
@@ -320,10 +382,10 @@ function settings() {
 // ---- render -------------------------------------------------------------------------------
 function pageSig() {
   switch (ui.page) {
-    case 'library': return JSON.stringify([S.games, S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
+    case 'library': return JSON.stringify([S.games, Object.keys(S.downloads), S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
-    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye]);
+    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
@@ -344,13 +406,14 @@ function render() {
     else main.innerHTML = { devices, runtime, accounts, settings }[ui.page]();
   }
   renderDrawer();
+  paintDownloads();
 }
 
 function go(page) { ui.page = page; if (page !== 'library') ui.selected = null; render(); }
 
 // ---- events -------------------------------------------------------------------------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],#vr,#autostart,#refresh,#savekey');
+  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],[data-download],[data-cancel-dl],[data-remove-dl],[data-use-version],#vr,#autostart,#refresh,#savekey,#pickdl');
   if (!t) return;
   const d = t.dataset;
   if (d.url !== undefined) { e.preventDefault(); send('openUrl', { url: t.href }); }
@@ -362,17 +425,27 @@ document.addEventListener('click', (e) => {
   else if (d.signin) send('signIn', { which: d.signin });
   else if (d.signout) send('signOut', { which: d.signout, id: d.id });
   else if (d.folder) send('openFolder', { id: d.folder });
+  else if (d.download) { const g = S.games.find((x) => x.app_id === d.download && x.source === 'meta'); const b = g && latest(g); if (b) send('download', { appId: d.download, binary: b.binary_id }); }
+  else if (d.cancelDl) send('cancelDownload', { appId: d.cancelDl });
+  else if (d.useVersion) send('useVersion', { appId: S.games.find((x) => x.id === ui.selected)?.app_id, version: d.useVersion });
+  else if (d.removeDl) {
+    const [appId, version] = d.removeDl.split('|');
+    if (ui.confirmRemove === d.removeDl) { ui.confirmRemove = null; send('removeDownload', { appId, version }); }
+    else { ui.confirmRemove = d.removeDl; render(); }
+  }
   else if (d.remove) { ui.selected = null; send('removeGame', { id: d.remove }); }
   else if (d.src) { ui.source = d.src; document.querySelectorAll('#src button').forEach((b) => b.classList.toggle('on', b === t)); render(); }
   else if (t.id === 'vr') send('setVrOnly', { on: !S.vrOnly });
   else if (t.id === 'autostart') send('setAutostart', { on: !S.autostart });
   else if (t.id === 'refresh') send('refresh');
+  else if (t.id === 'pickdl') send('pickDownloadDir');
   else if (t.id === 'savekey') { const k = $('#apikey'); send('saveApiKey', { key: k.value }); k.value = ''; }
 });
 document.addEventListener('dblclick', (e) => { const g = e.target.closest('.game'); if (g) send('launch', { id: g.dataset.game }); });
 document.addEventListener('input', (e) => { if (e.target.id === 'q') { ui.search = e.target.value; render(); } });
 document.addEventListener('change', (e) => {
   if (e.target.id === 'mode') send('setMode', { id: ui.selected, mode: e.target.value });
+  if (e.target.id === 'version') { const g = S.games.find((x) => x.id === ui.selected); if (g) { ui.version[g.app_id] = e.target.value; render(); } }
   if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
   if (e.target.id === 'mirroreye') send('setMirrorEye', { value: e.target.value });
 });

@@ -19,6 +19,44 @@ pub struct Settings {
     pub close_action: Option<String>,
     /// Which eye Oculus SDK games show on the desktop: "right"; None = the game's own (left).
     pub mirror_eye: Option<String>,
+    /// Where Meta games Atrium downloads go (one folder per game). None = ask on first download.
+    pub download_dir: Option<String>,
+    /// Meta games Atrium downloaded, by app id.
+    pub meta_installs: HashMap<String, MetaInstall>,
+}
+
+/// A Meta game Atrium downloaded: every version kept, one folder each, one of them played.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetaInstall {
+    pub name: String,
+    pub canonical: String,
+    /// The version Play starts (a key of `versions`).
+    pub active: String,
+    pub versions: HashMap<String, MetaVersion>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetaVersion {
+    pub dir: String,
+    pub launch_file: String,
+    pub launch_args: String,
+    pub version_code: i64,
+    pub binary_id: String,
+}
+
+impl MetaInstall {
+    pub fn current(&self) -> Option<&MetaVersion> {
+        self.versions.get(&self.active)
+    }
+
+    /// Installed versions, newest first.
+    pub fn sorted(&self) -> Vec<(&String, &MetaVersion)> {
+        let mut v: Vec<_> = self.versions.iter().collect();
+        v.sort_by(|a, b| b.1.version_code.cmp(&a.1.version_code));
+        v
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

@@ -35,7 +35,7 @@ fn library_folders() -> Vec<PathBuf> {
     out
 }
 
-fn local_art(canonical: &str) -> Art {
+pub fn local_art(canonical: &str) -> Art {
     let dir = PathBuf::from(STORE_ASSETS).join(format!("{canonical}_assets"));
     let pick = |f: &str| {
         let p = dir.join(f);

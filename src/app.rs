@@ -2,9 +2,11 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
-use crate::sys::{self, settings::{GameOptions, LocalGame, Settings}};
+use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_download::{self as dl, Build, Progress}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
+use crate::sys::{self, settings::{GameOptions, LocalGame, MetaInstall, MetaVersion, Settings}};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -45,6 +47,10 @@ struct State {
     cancel: Arc<AtomicBool>,
     /// A game being started (waiting for the headset can take a while); one at a time.
     launching: Option<String>,
+    /// Meta builds per app id, fetched when a game's details open (Err = why not).
+    versions: HashMap<String, Result<Vec<Build>, String>>,
+    /// Meta downloads running now, by app id.
+    downloads: HashMap<String, Progress>,
 }
 
 pub struct App {
@@ -107,6 +113,9 @@ impl App {
             "modes": set.game_options.iter().map(|(k, v)| (k.clone(), json!(v.mode))).collect::<serde_json::Map<_, _>>(),
             "starts": starts,
             "errors": s.owned.errors,
+            "downloadDir": set.download_dir,
+            "versions": s.versions.iter().map(|(k, v)| (k.clone(), match v { Ok(b) => json!({ "builds": b }), Err(e) => json!({ "error": e }) })).collect::<serde_json::Map<_, _>>(),
+            "downloads": s.downloads,
         })
     }
 
@@ -249,6 +258,121 @@ impl App {
         });
     }
 
+    /// Signed-in Meta accounts' tokens, the ones that own `app_id` first.
+    fn meta_tokens(&self, app_id: &str) -> Vec<String> {
+        let s = self.st();
+        let owns = s.owned.meta.iter().any(|(id, ..)| id == app_id);
+        let mut t: Vec<String> = s.settings.meta_accounts.iter().filter_map(|a| sys::secret::unseal(&a.token)).collect();
+        // `owned` is merged across accounts, so it can't say which one; with one owner it's moot.
+        if !owns {
+            t.truncate(1);
+        }
+        t
+    }
+
+    /// Every version Meta serves for a game (for the details panel's picker).
+    fn load_versions(self: &Arc<Self>, app_id: String) {
+        if self.st().versions.get(&app_id).is_some_and(|v| v.is_ok()) {
+            return;
+        }
+        self.spawn(move |app| {
+            let tokens = app.meta_tokens(&app_id);
+            let mut r = Err("Sign in to Meta (Accounts) to download".to_string());
+            for t in &tokens {
+                r = dl::builds(t, &app_id).map(|(_, b)| b);
+                if r.is_ok() {
+                    break;
+                }
+            }
+            app.st().versions.insert(app_id, r);
+            app.push();
+        });
+    }
+
+    /// Download one build of a Meta game into its own folder (<downloads>\<game>\<version>),
+    /// next to any other versions; pieces those already have are copied, not fetched. The new
+    /// version becomes the one Play starts.
+    fn start_download(self: &Arc<Self>, app_id: String, binary_id: String) {
+        let Some(build) = self.st().versions.get(&app_id).and_then(|v| v.as_ref().ok()).and_then(|b| b.iter().find(|b| b.binary_id == binary_id).cloned()) else { return };
+        if self.st().downloads.contains_key(&app_id) {
+            return;
+        }
+        let Some(root) = self.download_dir() else { return };
+        let name = self.game(&format!("meta:{app_id}")).map(|g| g.name).unwrap_or_else(|| app_id.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.st().downloads.insert(app_id.clone(), Progress { version: build.version.clone(), phase: "Starting".into(), cancel: cancel.clone(), ..Default::default() });
+        self.push();
+        self.spawn(move |app| {
+            let (dir, seeds) = {
+                let s = app.st();
+                let i = s.settings.meta_installs.get(&app_id);
+                // The game's folder: where its other versions are, else a new one.
+                let game_dir = i.and_then(|i| i.versions.values().next()).and_then(|v| PathBuf::from(&v.dir).parent().map(PathBuf::from)).unwrap_or_else(|| root.join(folder_name(&name, &app_id)));
+                let seeds: Vec<PathBuf> = i.map(|i| i.versions.iter().filter(|(k, _)| **k != build.version).map(|(_, v)| PathBuf::from(&v.dir)).collect()).unwrap_or_default();
+                (game_dir.join(folder_name(&build.version, &build.binary_id)), seeds)
+            };
+            let last_push = Mutex::new(std::time::Instant::now());
+            let progress = |phase: &str, done: u64, total: u64| {
+                if let Some(p) = app.st().downloads.get_mut(&app_id) {
+                    p.phase = phase.to_string();
+                    p.done = done;
+                    p.total = total;
+                }
+                let mut t = last_push.lock().unwrap_or_else(|e| e.into_inner());
+                if t.elapsed() > Duration::from_millis(400) {
+                    *t = std::time::Instant::now();
+                    app.push();
+                }
+            };
+            let mut r = Err("Sign in to Meta (Accounts) to download".to_string());
+            for t in app.meta_tokens(&app_id) {
+                r = dl::download(&t, &build.binary_id, &dir, &seeds, &cancel, &progress);
+                if r.as_ref().err().is_none_or(|e| !e.contains("refused")) {
+                    break;
+                }
+            }
+            app.st().downloads.remove(&app_id);
+            match r {
+                Ok(i) => {
+                    {
+                        let mut s = app.st();
+                        let e = s.settings.meta_installs.entry(app_id.clone()).or_insert_with(|| MetaInstall { name: name.clone(), ..Default::default() });
+                        e.canonical = i.canonical;
+                        e.active = build.version.clone();
+                        e.versions.insert(build.version.clone(), MetaVersion {
+                            dir: dir.to_string_lossy().into_owned(),
+                            launch_file: i.launch_file,
+                            launch_args: i.launch_args,
+                            version_code: build.version_code,
+                            binary_id: build.binary_id.clone(),
+                        });
+                        s.settings.save();
+                    }
+                    sys::log(&format!("downloaded meta:{app_id} {} to {}", build.version, dir.display()));
+                    app.notice(format!("{name} {} is ready to play", build.version));
+                }
+                Err(e) if e == "cancelled" => app.notice(format!("Stopped downloading {name} {}. Download it again to carry on where it stopped.", build.version)),
+                Err(e) => {
+                    sys::log(&format!("download meta:{app_id} failed: {e}"));
+                    app.notice(format!("{name}: {e}"));
+                }
+            }
+            app.rescan();
+        });
+    }
+
+    /// The downloads folder; asks for one the first time.
+    fn download_dir(&self) -> Option<PathBuf> {
+        if let Some(d) = self.st().settings.download_dir.clone() {
+            return Some(PathBuf::from(d));
+        }
+        let d = rfd::FileDialog::new().set_title("Where should Atrium save downloaded games?").pick_folder()?;
+        let mut s = self.st();
+        s.settings.download_dir = Some(d.to_string_lossy().into_owned());
+        s.settings.save();
+        Some(d)
+    }
+
     fn game(&self, id: &str) -> Option<Game> {
         self.st().games.iter().find(|g| g.id == id).cloned()
     }
@@ -378,6 +502,77 @@ impl App {
                 }
                 self.push();
             }
+            "metaVersions" => self.load_versions(arg("appId")),
+            "download" => {
+                let (app_id, binary) = (arg("appId"), arg("binary"));
+                // May ask for the downloads folder first: not on the UI thread.
+                self.spawn(move |app| app.start_download(app_id, binary));
+            }
+            "cancelDownload" => {
+                if let Some(p) = self.st().downloads.get(&arg("appId")) {
+                    p.cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            "useVersion" => {
+                let (app_id, version) = (arg("appId"), arg("version"));
+                let mut s = self.st();
+                let Some(i) = s.settings.meta_installs.get_mut(&app_id) else { return };
+                if !i.versions.contains_key(&version) {
+                    return;
+                }
+                i.active = version.clone();
+                let name = i.name.clone();
+                s.settings.save();
+                drop(s);
+                self.notice(format!("{name} will start version {version}"));
+                self.rescan();
+            }
+            "removeDownload" => {
+                let (app_id, version) = (arg("appId"), arg("version"));
+                let Some(v) = self.st().settings.meta_installs.get(&app_id).and_then(|i| i.versions.get(&version)).cloned() else { return };
+                if self.st().downloads.contains_key(&app_id) {
+                    return;
+                }
+                self.spawn(move |app| {
+                    let dir = PathBuf::from(&v.dir);
+                    // Only a folder Atrium filled (its manifest is there), never a guess.
+                    if dir.join("atrium_manifest.json").exists() {
+                        if let Err(e) = std::fs::remove_dir_all(&dir) {
+                            return app.notice(format!("Couldn't remove {}: {e}", dir.display()));
+                        }
+                    }
+                    let name = {
+                        let mut s = app.st();
+                        let Some(i) = s.settings.meta_installs.get_mut(&app_id) else { return };
+                        i.versions.remove(&version);
+                        // Removing the version Play starts: the newest left takes over.
+                        if i.active == version {
+                            i.active = i.sorted().first().map(|(k, _)| (*k).clone()).unwrap_or_default();
+                        }
+                        let name = i.name.clone();
+                        if i.versions.is_empty() {
+                            s.settings.meta_installs.remove(&app_id);
+                            // The game's folder too, once it's empty.
+                            if let Some(p) = dir.parent() {
+                                let _ = std::fs::remove_dir(p);
+                            }
+                        }
+                        s.settings.save();
+                        name
+                    };
+                    app.notice(format!("Removed {name} {version}"));
+                    app.rescan();
+                });
+            }
+            "pickDownloadDir" => self.spawn(|app| {
+                let Some(d) = rfd::FileDialog::new().set_title("Where should Atrium save downloaded games?").pick_folder() else { return };
+                {
+                    let mut s = app.st();
+                    s.settings.download_dir = Some(d.to_string_lossy().into_owned());
+                    s.settings.save();
+                }
+                app.push();
+            }),
             "signIn" => self.sign_in(if arg("which") == "steam" { "steam" } else { "meta" }),
             "cancelSignIn" => self.st().cancel.store(true, Ordering::Relaxed),
             "signOut" => {
@@ -455,4 +650,11 @@ impl App {
             other => sys::log(&format!("ui: unknown command {other}")),
         }
     }
+}
+
+/// A folder name for a downloaded game: its name without characters Windows won't take.
+fn folder_name(name: &str, app_id: &str) -> String {
+    let n: String = name.chars().map(|c| if c.is_alphanumeric() || " -_.()'&".contains(c) { c } else { ' ' }).collect();
+    let n = n.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches('.').to_string();
+    if n.is_empty() { app_id.to_string() } else { n }
 }
