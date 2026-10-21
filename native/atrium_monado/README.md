@@ -54,6 +54,17 @@ Edit Monado in a checkout of the pinned commit, then regenerate with `git diff` 
 - `0002`: the system name is the headset's own ("Oculus Rift CV1"), not "Monado: ...".
 - `0003`: OVRPlugin quirk: apps named "Oculus VR Plugin ..." (Meta's Unity/Unreal plugin) see the
   runtime name "Oculus" and may locate poses at XrTime 0 (= now). Same as the Windows runtime.
+- `0004`-`0005`: the Atrium streaming driver and target.
+- `0006`: the Rift drivers on Windows (`build.ps1 -Rift`): a Windows HID backend
+  (`os_hid_win32.c`, the hidraw semantics the drivers expect, no driver change), the prober opens
+  HID interfaces through it, sensors go through libusb + UsbDk, a `constellation` vcpkg feature
+  (Ceres), and the Windows config-dir file helper the Touch calibration cache uses.
+- `0007`: Touch position tracking. The Touch calibration's LED points (relative to the IMU, used
+  as is, as in Jan Schmidt's OpenHMD work) become a constellation LED model; each Touch joins the
+  HMD's tracker once its calibration is in. Pose = IMU rotation turned onto the cameras' frame
+  (slow blend towards each optical rotation) + optical position, held 2 s when the cameras lose it.
+  Not yet tested on hardware. Multi-sensor room setup is still upstream's placeholder (every
+  sensor at the same pose), so use one sensor until that's written.
 
 ## Hardware access
 

@@ -1,0 +1,465 @@
+From 50ed3a97c288dbec75858698cda0a4989d3a7515 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:22:20 +0100
+Subject: [PATCH 6/7] Atrium: Rift drivers build on Windows (HID backend,
+ config dir subpath)
+
+---
+ CMakeLists.txt                            |   3 +-
+ src/xrt/auxiliary/os/CMakeLists.txt       |   1 +
+ src/xrt/auxiliary/os/os_hid.h             |  14 ++
+ src/xrt/auxiliary/os/os_hid_win32.c       | 279 ++++++++++++++++++++++
+ src/xrt/auxiliary/util/u_file.cpp         |  29 +++
+ src/xrt/drivers/rift_sensor/rift_sensor.c |   9 +
+ src/xrt/state_trackers/prober/p_prober.c  |  17 +-
+ vcpkg.json                                |  11 +
+ 8 files changed, 358 insertions(+), 5 deletions(-)
+ create mode 100644 src/xrt/auxiliary/os/os_hid_win32.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 45ccb3742..643906d26 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -228,7 +228,8 @@ set(ILLIXR_PATH
+ # This one is named differently because that's what CTest uses
+ option(BUILD_TESTING "Enable building of the test suite?" ON)
+ 
+-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
++	# Atrium: Windows has os_hid_win32.c.
+ 	set(XRT_HAVE_INTERNAL_HID ON)
+ endif()
+ 
+diff --git a/src/xrt/auxiliary/os/CMakeLists.txt b/src/xrt/auxiliary/os/CMakeLists.txt
+index 2e2da5020..b535b7edc 100644
+--- a/src/xrt/auxiliary/os/CMakeLists.txt
++++ b/src/xrt/auxiliary/os/CMakeLists.txt
+@@ -15,6 +15,7 @@ add_library(
+ 	os_fd.h
+ 	os_hid.h
+ 	os_hid_hidraw.c
++	os_hid_win32.c
+ 	os_serial.h
+ 	os_threading.h
+ 	os_time.cpp
+diff --git a/src/xrt/auxiliary/os/os_hid.h b/src/xrt/auxiliary/os/os_hid.h
+index 05f5478a2..536264ab3 100644
+--- a/src/xrt/auxiliary/os/os_hid.h
++++ b/src/xrt/auxiliary/os/os_hid.h
+@@ -140,6 +140,20 @@ os_hid_destroy(struct os_hid_device *hid_dev)
+  */
+ int
+ os_hid_open_hidraw(const char *path, struct os_hid_device **out_hid);
++
++#ifdef XRT_OS_WINDOWS
++/*!
++ * Open a Windows HID device interface path (Atrium).
++ */
++int
++os_hid_open_win32(const char *path, struct os_hid_device **out_hid);
++
++/*!
++ * Find the HID interface path of a USB device's interface (Atrium).
++ */
++int
++os_hid_find_win32(uint16_t vendor_id, uint16_t product_id, int interface, char *out_path, size_t out_size);
++#endif
+ #endif
+ 
+ #ifdef __cplusplus
+diff --git a/src/xrt/auxiliary/os/os_hid_win32.c b/src/xrt/auxiliary/os/os_hid_win32.c
+new file mode 100644
+index 000000000..056455331
+--- /dev/null
++++ b/src/xrt/auxiliary/os/os_hid_win32.c
+@@ -0,0 +1,279 @@
++// Copyright 2026, Atrium contributors
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  Windows HID backend (Atrium): the hidraw semantics Monado's drivers expect, on the
++ *         Windows HID class driver.
++ *
++ * Like hidraw for devices with numbered reports, reads return the report id in the first byte
++ * and writes / feature reports take it there. Windows prefixes a 0 for devices without report
++ * ids; that byte is dropped on read, as hidraw does. A read that times out stays pending and its
++ * data is returned by the next read, so nothing is lost.
++ *
++ * @ingroup aux_os
++ */
++
++#include "xrt/xrt_config_os.h"
++
++#ifdef XRT_OS_WINDOWS
++
++#include "os/os_hid.h"
++#include "util/u_misc.h"
++
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <hidsdi.h>
++#include <hidpi.h>
++#include <setupapi.h>
++
++#include <ctype.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#pragma comment(lib, "hid.lib")
++#pragma comment(lib, "setupapi.lib")
++
++/*!
++ * @implements os_hid_device
++ */
++struct hid_win32
++{
++	struct os_hid_device base;
++
++	HANDLE handle;
++	USHORT input_len;
++	USHORT output_len;
++	USHORT feature_len;
++
++	OVERLAPPED read_ol;
++	bool read_pending;
++	uint8_t *read_buf;
++
++	OVERLAPPED write_ol;
++};
++
++static int
++os_hid_win32_read(struct os_hid_device *ohdev, uint8_t *data, size_t length, int milliseconds)
++{
++	struct hid_win32 *d = (struct hid_win32 *)ohdev;
++	DWORD got = 0;
++
++	if (!d->read_pending) {
++		memset(d->read_buf, 0, d->input_len);
++		ResetEvent(d->read_ol.hEvent);
++		if (!ReadFile(d->handle, d->read_buf, d->input_len, &got, &d->read_ol)) {
++			if (GetLastError() != ERROR_IO_PENDING) {
++				CancelIo(d->handle);
++				return -1;
++			}
++		}
++		d->read_pending = true;
++	}
++
++	DWORD wait = milliseconds < 0 ? INFINITE : (DWORD)milliseconds;
++	if (WaitForSingleObject(d->read_ol.hEvent, wait) != WAIT_OBJECT_0) {
++		return 0; // still pending: the next read picks it up
++	}
++	d->read_pending = false;
++	if (!GetOverlappedResult(d->handle, &d->read_ol, &got, FALSE)) {
++		return -1;
++	}
++	if (got == 0) {
++		return 0;
++	}
++
++	// Report id 0 means the device has no numbered reports: hidraw returns no id byte then.
++	const uint8_t *src = d->read_buf;
++	size_t n = got;
++	if (src[0] == 0) {
++		src++;
++		n--;
++	}
++	if (n > length) {
++		n = length;
++	}
++	memcpy(data, src, n);
++	return (int)n;
++}
++
++static int
++os_hid_win32_write(struct os_hid_device *ohdev, const uint8_t *data, size_t length)
++{
++	struct hid_win32 *d = (struct hid_win32 *)ohdev;
++
++	// Windows wants exactly the output report length.
++	size_t len = d->output_len > length ? d->output_len : length;
++	uint8_t *buf = U_TYPED_ARRAY_CALLOC(uint8_t, len);
++	memcpy(buf, data, length);
++
++	DWORD done = 0;
++	int ret = -1;
++	ResetEvent(d->write_ol.hEvent);
++	if (WriteFile(d->handle, buf, (DWORD)len, &done, &d->write_ol) || GetLastError() == ERROR_IO_PENDING) {
++		if (WaitForSingleObject(d->write_ol.hEvent, 1000) == WAIT_OBJECT_0 &&
++		    GetOverlappedResult(d->handle, &d->write_ol, &done, FALSE)) {
++			ret = (int)length;
++		} else {
++			CancelIo(d->handle);
++		}
++	}
++	free(buf);
++	return ret;
++}
++
++static int
++feature_get(struct hid_win32 *d, uint8_t *data, size_t length)
++{
++	size_t len = d->feature_len > length ? d->feature_len : length;
++	uint8_t *buf = U_TYPED_ARRAY_CALLOC(uint8_t, len);
++	buf[0] = data[0];
++	int ret = -1;
++	if (HidD_GetFeature(d->handle, buf, (ULONG)len)) {
++		size_t n = length < d->feature_len ? length : d->feature_len;
++		memcpy(data, buf, n);
++		ret = (int)n;
++	}
++	free(buf);
++	return ret;
++}
++
++static int
++os_hid_win32_get_feature(struct os_hid_device *ohdev, uint8_t report_num, uint8_t *data, size_t length)
++{
++	data[0] = report_num;
++	return feature_get((struct hid_win32 *)ohdev, data, length);
++}
++
++static int
++os_hid_win32_get_feature_timeout(struct os_hid_device *ohdev, void *data, size_t length, uint32_t timeout)
++{
++	struct hid_win32 *d = (struct hid_win32 *)ohdev;
++	int ret = -1;
++	for (uint32_t i = 0; i <= timeout; i++) {
++		ret = feature_get(d, (uint8_t *)data, length);
++		if (ret >= 0) {
++			break;
++		}
++		Sleep(1);
++	}
++	return ret;
++}
++
++static int
++os_hid_win32_set_feature(struct os_hid_device *ohdev, const uint8_t *data, size_t length)
++{
++	struct hid_win32 *d = (struct hid_win32 *)ohdev;
++	size_t len = d->feature_len > length ? d->feature_len : length;
++	uint8_t *buf = U_TYPED_ARRAY_CALLOC(uint8_t, len);
++	memcpy(buf, data, length);
++	int ret = HidD_SetFeature(d->handle, buf, (ULONG)len) ? (int)length : -1;
++	free(buf);
++	return ret;
++}
++
++static int
++os_hid_win32_get_physical_address(struct os_hid_device *ohdev, uint8_t *data, size_t length)
++{
++	(void)ohdev;
++	(void)data;
++	(void)length;
++	return -1;
++}
++
++static void
++os_hid_win32_destroy(struct os_hid_device *ohdev)
++{
++	struct hid_win32 *d = (struct hid_win32 *)ohdev;
++	CancelIo(d->handle);
++	CloseHandle(d->handle);
++	CloseHandle(d->read_ol.hEvent);
++	CloseHandle(d->write_ol.hEvent);
++	free(d->read_buf);
++	free(d);
++}
++
++int
++os_hid_open_win32(const char *path, struct os_hid_device **out_hid)
++{
++	HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
++	                       OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
++	if (h == INVALID_HANDLE_VALUE) {
++		return -(int)GetLastError();
++	}
++
++	PHIDP_PREPARSED_DATA pp = NULL;
++	HIDP_CAPS caps = {0};
++	if (!HidD_GetPreparsedData(h, &pp)) {
++		CloseHandle(h);
++		return -1;
++	}
++	HidP_GetCaps(pp, &caps);
++	HidD_FreePreparsedData(pp);
++
++	struct hid_win32 *d = U_TYPED_CALLOC(struct hid_win32);
++	d->base.read = os_hid_win32_read;
++	d->base.write = os_hid_win32_write;
++	d->base.get_feature = os_hid_win32_get_feature;
++	d->base.get_feature_timeout = os_hid_win32_get_feature_timeout;
++	d->base.set_feature = os_hid_win32_set_feature;
++	d->base.get_physical_address = os_hid_win32_get_physical_address;
++	d->base.destroy = os_hid_win32_destroy;
++	d->handle = h;
++	d->input_len = caps.InputReportByteLength;
++	d->output_len = caps.OutputReportByteLength;
++	d->feature_len = caps.FeatureReportByteLength;
++	d->read_buf = U_TYPED_ARRAY_CALLOC(uint8_t, d->input_len > 0 ? d->input_len : 1);
++	d->read_ol.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
++	d->write_ol.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
++
++	*out_hid = &d->base;
++	return 0;
++}
++
++int
++os_hid_find_win32(uint16_t vendor_id, uint16_t product_id, int interface, char *out_path, size_t out_size)
++{
++	GUID guid;
++	HidD_GetHidGuid(&guid);
++	HDEVINFO set = SetupDiGetClassDevsA(&guid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
++	if (set == INVALID_HANDLE_VALUE) {
++		return -1;
++	}
++
++	char want[32];
++	snprintf(want, sizeof(want), "vid_%04x&pid_%04x", vendor_id, product_id);
++	char want_mi[16];
++	snprintf(want_mi, sizeof(want_mi), "&mi_%02x", interface);
++
++	int ret = -1;
++	SP_DEVICE_INTERFACE_DATA ifd = {.cbSize = sizeof(ifd)};
++	for (DWORD i = 0; ret != 0 && SetupDiEnumDeviceInterfaces(set, NULL, &guid, i, &ifd); i++) {
++		DWORD need = 0;
++		SetupDiGetDeviceInterfaceDetailA(set, &ifd, NULL, 0, &need, NULL);
++		SP_DEVICE_INTERFACE_DETAIL_DATA_A *detail = malloc(need);
++		if (detail == NULL) {
++			continue;
++		}
++		detail->cbSize = sizeof(*detail);
++		if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, detail, need, NULL, NULL)) {
++			char lower[512];
++			snprintf(lower, sizeof(lower), "%s", detail->DevicePath);
++			for (char *c = lower; *c; c++) {
++				*c = (char)tolower((unsigned char)*c);
++			}
++			// A composite device names the interface (&mi_xx); a single-interface one doesn't.
++			bool iface_ok = strstr(lower, "&mi_") ? strstr(lower, want_mi) != NULL : interface == 0;
++			if (strstr(lower, want) && iface_ok) {
++				snprintf(out_path, out_size, "%s", detail->DevicePath);
++				ret = 0;
++			}
++		}
++		free(detail);
++	}
++	SetupDiDestroyDeviceInfoList(set);
++	return ret;
++}
++
++#endif
+diff --git a/src/xrt/auxiliary/util/u_file.cpp b/src/xrt/auxiliary/util/u_file.cpp
+index 02425eba0..e1e86d81f 100644
+--- a/src/xrt/auxiliary/util/u_file.cpp
++++ b/src/xrt/auxiliary/util/u_file.cpp
+@@ -142,4 +142,33 @@ u_file_open_file_in_config_dir(const char *filename, const char *mode)
+ 	return nullptr;
+ }
+ 
++FILE *
++u_file_open_file_in_config_dir_subpath(const char *subpath, const char *filename, const char *mode)
++{
++	auto config_path = get_config_path();
++	if (config_path.empty()) {
++		return NULL;
++	}
++
++	auto directory = config_path / subpath;
++	auto file_path_string = (directory / filename).string();
++	FILE *file = nullptr;
++	errno_t ret = fopen_s(&file, file_path_string.c_str(), mode);
++	if (ret == 0) {
++		return file;
++	}
++
++	// Try creating the path.
++	std::error_code ec;
++	fs::create_directories(directory, ec);
++
++	// Do not report error.
++	ret = fopen_s(&file, file_path_string.c_str(), mode);
++	if (ret == 0) {
++		return file;
++	}
++
++	return nullptr;
++}
++
+ #endif // !XRT_OS_LINUX
+diff --git a/src/xrt/drivers/rift_sensor/rift_sensor.c b/src/xrt/drivers/rift_sensor/rift_sensor.c
+index 340572d49..580faf593 100644
+--- a/src/xrt/drivers/rift_sensor/rift_sensor.c
++++ b/src/xrt/drivers/rift_sensor/rift_sensor.c
+@@ -396,6 +396,15 @@ rift_sensor_context_create(struct rift_sensor_context **out_context, struct xrt_
+ 		goto fail;
+ 	}
+ 
++#ifdef XRT_OS_WINDOWS
++	// Atrium: on Windows Meta's driver owns the sensors. UsbDk lends them to libusb while they're
++	// open and gives them back to Meta's driver afterwards, so no driver is swapped.
++	ret = libusb_set_option(context->usb_ctx, LIBUSB_OPTION_USE_USBDK);
++	if (ret < 0) {
++		SENSOR_WARN(context, "UsbDk isn't installed (%d): Rift sensors need it or a WinUSB driver", ret);
++	}
++#endif
++
+ 	if (!libusb_has_capability(LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER) ||
+ 	    !libusb_has_capability(LIBUSB_CAP_HAS_HID_ACCESS)) {
+ 		SENSOR_WARN(context,
+diff --git a/src/xrt/state_trackers/prober/p_prober.c b/src/xrt/state_trackers/prober/p_prober.c
+index dc318698a..67107b67d 100644
+--- a/src/xrt/state_trackers/prober/p_prober.c
++++ b/src/xrt/state_trackers/prober/p_prober.c
+@@ -1234,10 +1234,19 @@ p_open_hid_interface(struct xrt_prober *xp,
+ 	return -1;
+ 
+ #elif defined(XRT_OS_WINDOWS)
+-	(void)pdev;
+-	(void)ret;
+-	U_LOG_E("HID devices not yet supported on Windows, cannot open interface (%i)", hid_iface);
+-	return -1;
++	// Atrium: the Windows HID class driver's interface for this USB device.
++	char path[512];
++	ret = os_hid_find_win32(pdev->base.vendor_id, pdev->base.product_id, hid_iface, path, sizeof(path));
++	if (ret != 0) {
++		U_LOG_E("Could not find the requested hid interface (%i) on the device!", hid_iface);
++		return -1;
++	}
++	ret = os_hid_open_win32(path, out_hid_dev);
++	if (ret != 0) {
++		U_LOG_E("Failed to open device '%s' got '%i'", path, ret);
++		return ret;
++	}
++	return 0;
+ #elif defined(XRT_OS_OSX)
+ 	(void)pdev;
+ 	(void)ret;
+diff --git a/vcpkg.json b/vcpkg.json
+index 56eeecf7a..607d4e1b6 100644
+--- a/vcpkg.json
++++ b/vcpkg.json
+@@ -43,6 +43,17 @@
+                 }
+             ]
+         },
++        "constellation": {
++            "description": "Atrium: constellation tracking (Rift CV1 sensors)",
++            "dependencies": [
++                {
++                    "name": "ceres",
++                    "features": [
++                        "eigensparse"
++                    ]
++                }
++            ]
++        },
+         "tracking": {
+             "description": "OpenCV-based tracking features",
+             "dependencies": [
+-- 
+2.52.0.windows.1
+

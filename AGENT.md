@@ -50,6 +50,15 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-21: **Rift CV1 on Atrium's own runtime, Windows (route A: no Meta).** Monado patches
+  0006 (Rift drivers build on Windows: `os_hid_win32.c`, prober HID, sensors via libusb+UsbDk,
+  Ceres `constellation` vcpkg feature) and 0007 (Touch position tracking: the Touch's own
+  calibration LED points -> constellation LED model, IMU-relative and unflipped as in OpenHMD;
+  IMU rotation + optical position). `build.ps1 -Rift`, opt-in. Builds clean with MSVC; NOT yet
+  run on the Rift. Traps: `cmake --build ... -- -k 0` (not `-k 0`); PS Sense driver doesn't
+  compile on MSVC (off); `u_file_open_file_in_config_dir_subpath` had no Windows version.
+  Still to do: UsbDk on the test PC, hardware test, multi-sensor room setup (upstream puts every
+  sensor at one placeholder pose), grip/aim offsets for the Touch.
 - 2026-10-20 (18:25): **First picture on the Quest 3 through Atrium alone.** Khronos hello_xr
   (D3D11) on the Atrium Runtime (Windows, Monado) -> Atrium compositor -> RGB->NV12 compute ->
   Vulkan Video H.264 (RTX 5060) -> ALVR server_core over Wi-Fi -> Atrium headset app ->
