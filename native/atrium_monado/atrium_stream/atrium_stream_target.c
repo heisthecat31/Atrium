@@ -678,6 +678,12 @@ factory_detect(const struct comp_target_factory *ctf, struct comp_compositor *c)
 static bool
 factory_create_target(const struct comp_target_factory *ctf, struct comp_compositor *c, struct comp_target **out_ct)
 {
+	// The compositor tries every target in order when none is detected; this one is first, so without this check
+	// a wired headset (Rift) would get the streaming target instead of a window.
+	if (!debug_get_bool_option_atrium_stream_target()) {
+		return false;
+	}
+
 	struct comp_target *ct = target_create(c);
 	if (ct == NULL) {
 		return false;
