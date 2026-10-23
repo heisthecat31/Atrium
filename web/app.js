@@ -301,7 +301,9 @@ function step(ok, title, body, action = '') {
 function mix() {
   const m = S.mix || {}, st = m.state, busy = m.busy;
   const others = (S.hw?.headsets || []).filter((h) => !(h.family === 'rift' && h.via === 'USB'));
-  const headset = others.find((h) => h.active) || others[0];
+  // Streamers running now (Atrium's own tracking service shows as "monado": not a headset).
+  const streams = (S.hw?.streaming || []).filter((s) => s.running && s.id !== 'monado');
+  const headset = others.find((h) => h.active) || others[0] || (streams[0] && { name: streams[0].name, via: 'streaming' });
   const head = `<div class="head"><div><h1>Mix & match</h1><p class="lede">Use any headset with any controllers you have.</p></div><div class="grow"></div><span class="pill accent">Currently only Rift CV1 controllers</span></div>`;
   if (!st) return `<div class="page">${head}<div class="empty">Checking your devices…</div></div>`;
   const sensorsOk = st.sensors.length > 0 && st.sensors.every(([, k]) => k === 'winusb') && st.lpm_off;
@@ -320,6 +322,7 @@ function mix() {
     </div>
     <h2>Getting the Touches ready</h2>
     <div class="card list steps">
+      ${step(!!headset, 'Headset connected', headset ? `${esc(headset.name)} (${esc(headset.via)}): games show on it.` : 'Start Virtual Desktop on your headset and connect to this PC. Games can\'t start without a headset.')}
       ${step(st.rift, 'Rift CV1 headset on USB', 'The Touches talk to the PC through the Rift\'s radio. It only needs its USB cable; the display isn\'t used.')}
       ${step(!st.meta_running, 'Meta\'s software off', st.meta_running ? 'Meta\'s runtime is running and fights Atrium for the Rift. It comes back when you restart the PC.' : 'Atrium drives the Rift itself.',
         st.meta_running ? btn('mixStopMeta', 'Turn it off', true, 'meta') : '')}
