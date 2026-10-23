@@ -224,10 +224,12 @@ static void ReadControls()
 	d.pauseGame = d.shm->pauseGame != 0;
 }
 
-// The game's binding path after the Controls tab's remapping ("x=a,a=x"): same if not remapped,
-// empty if the remapped button lacks that input (a touch sensor on the menu button).
-static std::string Remapped(const std::string& path, const std::string& remap)
+// Where a game's binding goes with the Controls tab's remapping ("x=y": pressing X, the game
+// gets Y). A game input on button B is pressed by every button remapped to B, and by B itself
+// unless B is remapped to something else. Empty: no button gives it any more.
+static std::vector<std::string> Physical(const std::string& path, const std::string& remap)
 {
+	std::vector<std::pair<const ButtonPath*, const ButtonPath*>> pairs;
 	for (size_t i = 0; i < remap.size();) {
 		size_t end = remap.find(',', i);
 		if (end == std::string::npos) end = remap.size();
@@ -240,14 +242,21 @@ static std::string Remapped(const std::string& path, const std::string& remap)
 			if (pair.substr(0, eq) == k.id) from = &k;
 			if (pair.substr(eq + 1) == k.id) to = &k;
 		}
-		if (!from || !to) continue;
+		if (from && to && from != to) pairs.push_back({ from, to });
+	}
+	for (const ButtonPath& btn : kButtons) {
 		for (const char* suffix : { "/click", "/touch" }) {
-			if (path != std::string(from->base) + suffix) continue;
-			if (strcmp(suffix, "/touch") == 0 && !to->touch) return {};
-			return std::string(to->base) + suffix;
+			if (path != std::string(btn.base) + suffix) continue;
+			std::vector<std::string> out;
+			bool moved = false;
+			for (auto& pr : pairs) moved = moved || pr.first == &btn;
+			if (!moved) out.push_back(path);
+			for (auto& pr : pairs)
+				if (pr.second == &btn && (strcmp(suffix, "/click") == 0 || pr.first->touch)) out.push_back(std::string(pr.first->base) + suffix);
+			return out;
 		}
 	}
-	return path;
+	return { path };
 }
 
 static bool TouchFamily(const char* profile) { return strstr(profile, "touch") != nullptr; }
@@ -309,9 +318,12 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 			char buf[XR_MAX_PATH_LENGTH];
 			uint32_t n = 0;
 			if (XR_SUCCEEDED(BK(instance, xrPathToString)(instance, sb.binding, sizeof buf, &n, buf))) {
-				std::string to = Remapped(buf, remap);
-				if (to.empty()) continue;
-				if (to != buf) sb.binding = Path(instance, to.c_str());
+				for (const std::string& to : Physical(buf, remap)) {
+					XrActionSuggestedBinding moved = sb;
+					moved.binding = Path(instance, to.c_str());
+					all.push_back(moved);
+				}
+				continue;
 			}
 		}
 		all.push_back(sb);
@@ -407,6 +419,7 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSyncActions(XrSession session, const XrAct
 	auto next = NextFn<PFN_xrSyncActions>("xrSyncActions");
 	DashState& d = g_dash;
 	if (!d.attached || session != d.session || !info) return next(session, info);
+	if (ShmReady() && d.shm->activeGamePid != GetCurrentProcessId()) d.shm->activeGamePid = GetCurrentProcessId();
 	bool open = DashOpenHere();
 	// Open: only Atrium's set, so the game's actions read inactive (the game gets no input).
 	std::vector<XrActiveActionSet> sets;
@@ -523,6 +536,7 @@ void DashSessionDestroying(XrSession session)
 	if (session != d.session) return;
 	ReleaseImages();
 	if (d.shm && d.shm->gamePid == GetCurrentProcessId()) { d.shm->open = 0; d.shm->gamePid = 0; }
+	if (d.shm && d.shm->activeGamePid == GetCurrentProcessId()) d.shm->activeGamePid = 0;
 	if (d.d11) d.d11->Release();
 	if (d.d12) d.d12->Release();
 	if (d.q12) d.q12->Release();

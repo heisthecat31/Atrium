@@ -19,7 +19,7 @@
 #define ATRIUM_DASH_TEXTURE L"Local\\AtriumDashTexture" // + slot number
 #define ATRIUM_DASH_SLOTS 3
 #define ATRIUM_DASH_MAGIC 0x48534144u // "DASH"
-#define ATRIUM_DASH_VERSION 3u
+#define ATRIUM_DASH_VERSION 4u
 
 struct AtriumDashPose
 {
@@ -72,4 +72,8 @@ struct AtriumDashShared
 	volatile int32_t openButton; // index into the buttons list (0 menu, 1 X, 2 Y, 3 A, 4 B, 5/6 sticks)
 	volatile int32_t openHold;   // 1 hold, 0 press
 	volatile int32_t pauseGame;  // 1: the game loses focus while the dash is open
+
+	// Game side: the game running on the Atrium Runtime (the dash opens over it when the Oculus
+	// button is pressed: Meta's runtime keeps that button, the dash learns of it from Meta's log).
+	volatile uint32_t activeGamePid;
 };

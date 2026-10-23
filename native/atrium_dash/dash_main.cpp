@@ -1448,6 +1448,80 @@ static void DashFrame(const AtriumDashInput& in, bool home)
 	g_shm->frameSeq++;
 }
 
+// ---- the Oculus button ----------------------------------------------------------------------
+// Meta's runtime keeps the Oculus button from apps, but with its own Dash off it still logs each
+// press ("[LifeCycle] Oculus Button: true") to its service log as it happens. When that's the
+// dash button (Controls tab), the dash watches the newest log and opens over the running game.
+static void OculusPressed()
+{
+	if (g_look.openButton != "oculus" || g_shm->homeActive) return;
+	uint32_t pid = g_shm->activeGamePid;
+	if (!pid) return;
+	if (g_shm->open && g_shm->gamePid == pid) {
+		g_shm->open = 0;
+		Send("{\"cmd\":\"dashClosed\"}");
+	} else {
+		g_shm->gamePid = pid;
+		g_shm->open = 1;
+	}
+	g_shm->hapticHand = 1;
+	g_shm->hapticSeq++;
+	Log("oculus button: dash %s", g_shm->open ? "open" : "closed");
+}
+
+static void OculusButtonThread()
+{
+	wchar_t local[MAX_PATH];
+	if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return;
+	std::wstring dir = std::wstring(local) + L"\\Oculus\\";
+	std::wstring file;
+	LONGLONG offset = -1;
+	ULONGLONG nextScan = 0;
+	std::string pending;
+	while (!g_quit) {
+		if (GetTickCount64() >= nextScan) {
+			// The newest service log (OVRServer starts a new one each time it starts).
+			nextScan = GetTickCount64() + 3000;
+			WIN32_FIND_DATAW fd;
+			HANDLE h = FindFirstFileW((dir + L"Service_*.txt").c_str(), &fd);
+			std::wstring newest;
+			FILETIME best = {};
+			if (h != INVALID_HANDLE_VALUE) {
+				do {
+					if (CompareFileTime(&fd.ftLastWriteTime, &best) > 0) { best = fd.ftLastWriteTime; newest = fd.cFileName; }
+				} while (FindNextFileW(h, &fd));
+				FindClose(h);
+			}
+			if (!newest.empty() && newest != file) { file = newest; offset = -1; pending.clear(); }
+		}
+		if (!file.empty()) {
+			HANDLE f = CreateFileW((dir + file).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+			if (f != INVALID_HANDLE_VALUE) {
+				LARGE_INTEGER size;
+				GetFileSizeEx(f, &size);
+				if (offset < 0 || size.QuadPart < offset) offset = size.QuadPart; // only presses from now on
+				if (size.QuadPart > offset) {
+					LARGE_INTEGER at;
+					at.QuadPart = offset;
+					SetFilePointerEx(f, at, nullptr, FILE_BEGIN);
+					std::string buf((size_t)std::min<LONGLONG>(size.QuadPart - offset, 1 << 20), 0);
+					DWORD got = 0;
+					ReadFile(f, &buf[0], (DWORD)buf.size(), &got, nullptr);
+					offset += got;
+					pending.append(buf.data(), got);
+					size_t nlPos;
+					while ((nlPos = pending.find('\n')) != std::string::npos) {
+						if (pending.find("Oculus Button: true") < nlPos) OculusPressed();
+						pending.erase(0, nlPos + 1);
+					}
+				}
+				CloseHandle(f);
+			}
+		}
+		Sleep(25);
+	}
+}
+
 // ---- home: atrium-dash's own OpenXR session -------------------------------------------------
 #define XRC(x) do { XrResult r_ = (x); if (XR_FAILED(r_)) { Log("%s failed: %d", #x, (int)r_); return false; } } while (0)
 
@@ -1849,6 +1923,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 	if (g_preview) return Preview(argv[2], argv[3], argc >= 5 ? argv[4] : L"");
 	Log("atrium-dash ready (%ux%u per eye)", kEyeW, kEyeH);
 	std::thread(StdinThread).detach();
+	std::thread(OculusButtonThread).detach();
 
 	int lastInput = 0, lastClose = 0;
 	bool wasOpen = false;
