@@ -1,0 +1,127 @@
+From c058576ce344fdd3b9bd2e769b39bc891b6eb8f5 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:11:43 +0100
+Subject: [PATCH 9/9] Atrium: Touch fixes from the first tracked run
+
+- Skip empty Touch radio messages (all zero, relayed while the sensors track):
+  read as input they were trigger and grip full, stick down-left. As OpenHMD.
+- Reject optical poses that jump further than a hand can move (a few in a row
+  are believed), and cap extrapolation speed: one bad solve put a hand 4 km away.
+- Interpolate inside the optical history and fall back to the latest pose
+  instead of zero when the history can't answer.
+---
+ src/xrt/drivers/rift/rift_internal.h |  2 +
+ src/xrt/drivers/rift/rift_radio.c    | 56 ++++++++++++++++++++++++----
+ 2 files changed, 51 insertions(+), 7 deletions(-)
+
+diff --git a/src/xrt/drivers/rift/rift_internal.h b/src/xrt/drivers/rift/rift_internal.h
+index d6e48d0a1..16c0e5d4e 100644
+--- a/src/xrt/drivers/rift/rift_internal.h
++++ b/src/xrt/drivers/rift/rift_internal.h
+@@ -798,6 +798,8 @@ struct rift_touch_controller
+ 		struct m_relation_history *imu_hist;
+ 		//! Thread safe: raw optical poses of the IMU frame.
+ 		struct m_relation_history *optical_hist;
++		//! Tracker threads: optical poses rejected in a row as implausible jumps.
++		uint32_t rejects;
+ 
+ 		//! Locked by input.mutex: world-from-fusion rotation, valid after the first optical pose.
+ 		bool have_correction;
+diff --git a/src/xrt/drivers/rift/rift_radio.c b/src/xrt/drivers/rift/rift_radio.c
+index 2bacd8a85..217d22096 100644
+--- a/src/xrt/drivers/rift/rift_radio.c
++++ b/src/xrt/drivers/rift/rift_radio.c
+@@ -49,6 +49,10 @@ rift_update_input(struct xrt_device *device, size_t index, union xrt_input_value
+ #define RIFT_TOUCH_MAX_PREDICT_NS (50 * U_TIME_1MS_IN_NS)
+ //! How far each optical pose pulls the IMU rotation towards the cameras' rotation.
+ #define RIFT_TOUCH_CORRECTION_ALPHA 0.05f
++//! Faster than a hand moves: extrapolation is capped at this, and a jump implying more is a bad solve.
++#define RIFT_TOUCH_MAX_SPEED_M_S 10.0f
++//! Bad-looking optical poses in a row after which they're believed anyway (the Touch really moved).
++#define RIFT_TOUCH_MAX_REJECTS 3
+ 
+ /*!
+  * The Touch pose: IMU rotation turned into the cameras' frame, with the cameras' position. Before the first optical
+@@ -100,20 +104,33 @@ rift_touch_controller_get_fused_relation(struct rift_touch_controller *controlle
+ 		int64_t max_age_ns = for_prior ? RIFT_TOUCH_PRIOR_MAX_AGE_NS : RIFT_TOUCH_OPTICAL_HOLD_NS;
+ 
+ 		if (age_ns <= max_age_ns) {
+-			int64_t query_ns = age_ns > RIFT_TOUCH_MAX_PREDICT_NS ? latest_ns + RIFT_TOUCH_MAX_PREDICT_NS
+-			                                                      : at_timestamp_ns;
+ 			struct xrt_space_relation optical = latest;
+-			m_relation_history_get(controller->tracking.optical_hist, query_ns, &optical);
++			if (at_timestamp_ns < latest_ns) {
++				// Between optical poses: interpolate, keeping the latest one if the history can't.
++				struct xrt_space_relation past;
++				if (m_relation_history_get(controller->tracking.optical_hist, at_timestamp_ns, &past) !=
++				        M_RELATION_HISTORY_RESULT_INVALID &&
++				    (past.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT)) {
++					optical = past;
++				}
++			} else if (latest.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) {
++				// Ahead of the last optical pose: a short, speed-limited extrapolation, so one bad
++				// velocity estimate can't throw the hand away.
++				int64_t dt_ns = age_ns < RIFT_TOUCH_MAX_PREDICT_NS ? age_ns : RIFT_TOUCH_MAX_PREDICT_NS;
++				struct xrt_vec3 v = latest.linear_velocity;
++				float speed = m_vec3_len(v);
++				if (speed > RIFT_TOUCH_MAX_SPEED_M_S) {
++					v = m_vec3_mul_scalar(v, RIFT_TOUCH_MAX_SPEED_M_S / speed);
++				}
++				optical.pose.position =
++				    m_vec3_add(latest.pose.position, m_vec3_mul_scalar(v, (float)time_ns_to_s(dt_ns)));
++			}
+ 
+ 			relation.pose.position = optical.pose.position;
+ 			relation.relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
+ 
+ 			if (age_ns <= RIFT_TOUCH_OPTICAL_FRESH_NS) {
+ 				relation.relation_flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+-				if (optical.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) {
+-					relation.linear_velocity = optical.linear_velocity;
+-					relation.relation_flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
+-				}
+ 			}
+ 		}
+ 	}
+@@ -138,6 +155,22 @@ rift_touch_controller_push_constellation_sample(struct t_constellation_tracker_d
+ 	relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+ 	                          XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
+ 
++	// A pose that jumps further than a hand can move since the last one is a bad solve (a few in a row
++	// and the Touch really is there now, e.g. after being out of view).
++	int64_t prev_ns;
++	struct xrt_space_relation prev;
++	if (m_relation_history_get_latest(controller->tracking.optical_hist, &prev_ns, &prev) &&
++	    sample->timestamp_ns > prev_ns) {
++		float dist = m_vec3_len(m_vec3_sub(sample->pose.position, prev.pose.position));
++		float dt_s = (float)time_ns_to_s(sample->timestamp_ns - prev_ns);
++		if (dist > RIFT_TOUCH_MAX_SPEED_M_S * dt_s + 0.05f &&
++		    controller->tracking.rejects < RIFT_TOUCH_MAX_REJECTS) {
++			controller->tracking.rejects++;
++			return;
++		}
++	}
++	controller->tracking.rejects = 0;
++
+ 	// Samples from several sensors may arrive slightly out of order, older ones are dropped here.
+ 	if (!m_relation_history_push_with_motion_estimation(controller->tracking.optical_hist, &relation,
+ 	                                                    sample->timestamp_ns)) {
+@@ -1058,6 +1091,15 @@ rift_touch_controller_handle_radio_input_report(struct rift_hmd *hmd,
+ {
+ 	struct rift_touch_controller_calibration *c = &controller->input.calibration;
+ 
++	// Atrium: the radio also relays empty Touch messages (all zero, e.g. sync slots while the sensors are
++	// tracking). Read as input they'd be trigger and grip fully pressed, stick hard down-left, and a zero IMU
++	// sample. OpenHMD skips them the same way.
++	if (message.touch.timestamp == 0 && message.touch.accel[0] == 0 && message.touch.accel[1] == 0 &&
++	    message.touch.accel[2] == 0 && message.touch.gyro[0] == 0 && message.touch.gyro[1] == 0 &&
++	    message.touch.gyro[2] == 0) {
++		return;
++	}
++
+ 	uint8_t tgs[5];
+ 	memcpy(tgs, message.touch.touch_grip_stick_state, sizeof tgs);
+ 	uint16_t raw_trigger = tgs[0] | ((tgs[1] & 0x03) << 8);
+-- 
+2.52.0.windows.1
+

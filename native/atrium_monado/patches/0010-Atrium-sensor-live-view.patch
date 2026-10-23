@@ -1,0 +1,180 @@
+From 082ae49bb94732179ecbb978e4814979cfc7f6c6 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:34:45 +0100
+Subject: [PATCH] Atrium: live view of each camera stream for the Atrium app
+ (Windows)
+
+Each 8-bit grey stream (the Rift sensors) publishes a half-size picture (2x2 max,
+so LED dots survive) up to 30 times a second in shared memory
+Local\AtriumSensorView<n>: a 64-byte header (magic ATSV, size, an odd-while-
+writing sequence number, serial) and the pixels. The app's Mix & match tab
+shows it so users can place their sensors.
+---
+ src/xrt/drivers/uvc/uvc_driver.c   | 115 +++++++++++++++++++++++++++++
+ src/xrt/drivers/uvc/uvc_internal.h |   5 ++
+ 2 files changed, 120 insertions(+)
+
+diff --git a/src/xrt/drivers/uvc/uvc_driver.c b/src/xrt/drivers/uvc/uvc_driver.c
+index 2fbe1ba80..b0e5695f6 100644
+--- a/src/xrt/drivers/uvc/uvc_driver.c
++++ b/src/xrt/drivers/uvc/uvc_driver.c
+@@ -19,6 +19,13 @@
+ 
+ #include "uvc_internal.h"
+ 
++#include "os/os_time.h"
++#include "xrt/xrt_config_os.h"
++#ifdef XRT_OS_WINDOWS
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
++
+ #include <assert.h>
+ #include <errno.h>
+ #include <libusb.h>
+@@ -118,6 +125,112 @@ uvc_get_cur(libusb_device_handle *dev,
+ 	return ret;
+ }
+ 
++/*
++ * Atrium: a live view of each grey camera stream (the Rift sensors) for the Atrium app, so users
++ * can see what a sensor sees while placing it. Windows only: shared memory named
++ * Local\AtriumSensorView<n> (n = 0, 1, ... in the order streams start), holding a header and a
++ * half-size image (2x2 max, so LED dots survive), updated up to 30 times a second. The sequence
++ * number is odd while a frame is being written; readers copy only between two equal even values.
++ */
++#ifdef XRT_OS_WINDOWS
++#define ATRIUM_VIEW_MAGIC 0x56535441u // "ATSV"
++#define ATRIUM_VIEW_HEADER 64
++#define ATRIUM_VIEW_MAX_W 640
++#define ATRIUM_VIEW_MAX_H 480
++#define ATRIUM_VIEW_INTERVAL_NS (33 * U_TIME_1MS_IN_NS)
++
++struct atrium_view_header
++{
++	uint32_t magic;
++	uint32_t version;
++	uint32_t width;
++	uint32_t height;
++	volatile LONG64 sequence;
++	int64_t timestamp_ns;
++	char serial[32];
++};
++
++static volatile LONG atrium_view_count = 0;
++
++static void
++uvc_publish_view(struct uvc_fs *stream, struct xrt_frame *frame)
++{
++	if (frame->format != XRT_FORMAT_L8) {
++		return;
++	}
++	int64_t now = (int64_t)os_monotonic_get_ns();
++	if (now - stream->atrium_view_last_ns < ATRIUM_VIEW_INTERVAL_NS) {
++		return;
++	}
++	stream->atrium_view_last_ns = now;
++
++	uint32_t w = frame->width / 2, h = frame->height / 2;
++	if (w > ATRIUM_VIEW_MAX_W || h > ATRIUM_VIEW_MAX_H) {
++		return;
++	}
++
++	if (stream->atrium_view == NULL) {
++		LONG index = InterlockedIncrement(&atrium_view_count) - 1;
++		char name[64];
++		snprintf(name, sizeof name, "Local\\AtriumSensorView%ld", index);
++		DWORD size = ATRIUM_VIEW_HEADER + ATRIUM_VIEW_MAX_W * ATRIUM_VIEW_MAX_H;
++		HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, size, name);
++		if (mapping == NULL) {
++			return;
++		}
++		stream->atrium_view_mapping = mapping;
++		stream->atrium_view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, size);
++		if (stream->atrium_view == NULL) {
++			return;
++		}
++		struct atrium_view_header *hdr = (struct atrium_view_header *)stream->atrium_view;
++		hdr->magic = ATRIUM_VIEW_MAGIC;
++		hdr->version = 1;
++		snprintf(hdr->serial, sizeof hdr->serial, "%s", stream->base.serial);
++		UVC_INFO(stream, "Live view of %s at %s", stream->base.serial, name);
++	}
++
++	struct atrium_view_header *hdr = (struct atrium_view_header *)stream->atrium_view;
++	uint8_t *out = stream->atrium_view + ATRIUM_VIEW_HEADER;
++	InterlockedIncrement64(&hdr->sequence); // odd: writing
++	hdr->width = w;
++	hdr->height = h;
++	hdr->timestamp_ns = now;
++	for (uint32_t y = 0; y < h; y++) {
++		const uint8_t *a = frame->data + (size_t)(2 * y) * frame->stride;
++		const uint8_t *b = a + frame->stride;
++		uint8_t *o = out + (size_t)y * w;
++		for (uint32_t x = 0; x < w; x++) {
++			uint8_t m = a[2 * x] > a[2 * x + 1] ? a[2 * x] : a[2 * x + 1];
++			uint8_t n = b[2 * x] > b[2 * x + 1] ? b[2 * x] : b[2 * x + 1];
++			o[x] = m > n ? m : n;
++		}
++	}
++	InterlockedIncrement64(&hdr->sequence); // even: done
++}
++
++static void
++uvc_close_view(struct uvc_fs *stream)
++{
++	if (stream->atrium_view != NULL) {
++		UnmapViewOfFile(stream->atrium_view);
++		stream->atrium_view = NULL;
++	}
++	if (stream->atrium_view_mapping != NULL) {
++		CloseHandle(stream->atrium_view_mapping);
++		stream->atrium_view_mapping = NULL;
++	}
++}
++#else
++static void
++uvc_publish_view(struct uvc_fs *stream, struct xrt_frame *frame)
++{}
++
++static void
++uvc_close_view(struct uvc_fs *stream)
++{}
++#endif
++
+ static void
+ process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
+ {
+@@ -280,6 +393,7 @@ process_payload(struct uvc_fs *stream, unsigned char *payload, size_t len)
+ 
+ 	if (stream->frame_collected == stream->frame_size || is_eof) {
+ 		stream->cur_frame->size = stream->frame_collected;
++		uvc_publish_view(stream, stream->cur_frame);
+ 		if (stream->sink) {
+ 			xrt_sink_push_frame(stream->sink, stream->cur_frame);
+ 		}
+@@ -723,6 +837,7 @@ uvc_fs_destroy(struct xrt_fs *xfs)
+ 	}
+ 
+ 	os_mutex_destroy(&stream->frames_lock);
++	uvc_close_view(stream);
+ 
+ 	return 0;
+ }
+diff --git a/src/xrt/drivers/uvc/uvc_internal.h b/src/xrt/drivers/uvc/uvc_internal.h
+index 0f5e5f12a..f90a722d8 100644
+--- a/src/xrt/drivers/uvc/uvc_internal.h
++++ b/src/xrt/drivers/uvc/uvc_internal.h
+@@ -78,4 +78,9 @@ struct uvc_fs
+ 
+ 	void *get_frame_timestamp_user_data;
+ 	get_frame_timestamp_t get_frame_timestamp;
++
++	//! Atrium (Windows): the live view this stream publishes for the Atrium app (uvc_driver.c).
++	void *atrium_view_mapping;
++	uint8_t *atrium_view;
++	int64_t atrium_view_last_ns;
+ };
+-- 
+2.52.0.windows.1
+

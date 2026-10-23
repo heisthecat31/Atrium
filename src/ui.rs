@@ -58,6 +58,13 @@ fn serve(req: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     let uri = req.uri();
     let (body, mime, cache): (Cow<'static, [u8]>, &str, &str) = if let Some((b, m)) = page_file(uri.path()) {
         (Cow::Borrowed(b), m, "no-store")
+    } else if uri.path() == "/sensor-view" {
+        // Mix & match: the latest picture from Rift sensor i (services/mix.rs), polled ~30 times a second.
+        let i = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()).find(|(k, _)| k == "i").and_then(|(_, v)| v.parse().ok()).unwrap_or(0);
+        match crate::services::mix::view(i) {
+            Some(b) => (Cow::Owned(b), "application/octet-stream", "no-store"),
+            None => return Response::builder().status(StatusCode::NOT_FOUND).body(Cow::Borrowed(&b""[..])).unwrap(),
+        }
     } else if uri.path() == "/art" {
         match art(uri.query().unwrap_or_default()) {
             Some((b, m)) => (Cow::Owned(b), m, "max-age=86400"),

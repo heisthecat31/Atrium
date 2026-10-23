@@ -2,7 +2,7 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, atrium_service, dash, launcher, library::{self as lib, Game, Owned}, meta_download::{self as dl, Build, Progress}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
+use crate::services::{headsets::{self, Hardware}, atrium_service, dash, launcher, library::{self as lib, Game, Owned}, meta_download::{self as dl, Build, Progress}, meta_runtime, mix::{self, MixState}, runtime::{self as rt, RuntimeState}, standalone};
 use crate::sys::{self, settings::{GameOptions, LocalGame, MetaInstall, MetaVersion, Settings}};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -51,6 +51,10 @@ struct State {
     versions: HashMap<String, Result<Vec<Build>, String>>,
     /// Meta downloads running now, by app id.
     downloads: HashMap<String, Progress>,
+    /// Mix & match tab: tracking service, sensors, calibration (refreshed with the hardware).
+    mix: Option<MixState>,
+    /// A Mix & match step that asks Windows for admin is running ("sensors", "meta", ...).
+    mix_busy: Option<&'static str>,
     /// The game Atrium last started, while its process runs (the dash's Now Playing / Quit).
     running: Option<Running>,
 }
@@ -144,6 +148,7 @@ impl App {
             "downloadDir": set.download_dir,
             "versions": s.versions.iter().map(|(k, v)| (k.clone(), match v { Ok(b) => json!({ "builds": b }), Err(e) => json!({ "error": e }) })).collect::<serde_json::Map<_, _>>(),
             "downloads": s.downloads,
+            "mix": { "enabled": set.mix.enabled, "controllers": if set.mix.controllers.is_empty() { "cv1" } else { set.mix.controllers.as_str() }, "state": s.mix, "busy": s.mix_busy },
         })
     }
 
@@ -157,11 +162,30 @@ impl App {
         let mut asked_dash_off = false;
         self.spawn(move |app| loop {
             let hw = headsets::detect();
-            let mut st = rt::state(&hw);
+            let (mix_on, touch) = {
+                let s = app.st();
+                (s.settings.mix.enabled, mix::touch_for(&s.settings))
+            };
+            // Mix & match: the Rift on USB only lends its Touches. Atrium's tracking service drives
+            // it (not Meta's runtime) and the game's headset is whatever else is connected.
+            let rift = meta_runtime::needed(&hw);
+            let mut st = rt::state(&hw, mix_on);
+            if mix_on {
+                if rift && !mix::service_running() {
+                    if let Err(e) = mix::start_service() {
+                        sys::log(&e);
+                    }
+                }
+            } else if mix::service_running() {
+                mix::stop_service();
+            }
+            let mix_state = mix::state(rift);
             // A wired Rift drops off USB for a moment whenever OVRServer powers it up; don't let
             // one missed pass hand the next game to another backend (Virtual Desktop's service
             // always runs, so it would win).
-            if meta_runtime::needed(&hw) {
+            if mix_on {
+                last_wired = None;
+            } else if meta_runtime::needed(&hw) {
                 last_wired = Some(std::time::Instant::now());
             } else if last_wired.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
                 if let Some(meta) = st.backends.iter().find(|b| b.id == "meta").cloned() {
@@ -169,16 +193,17 @@ impl App {
                     st.reason = "Meta headset connected".into();
                 }
             }
-            rt::write_backend(&st);
+            rt::write_backend(&st, touch.as_deref());
             // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does.
-            if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
+            if !mix_on && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
                 if let Err(e) = meta_runtime::start() {
                     sys::log(&e);
                 }
             }
             // ...with Meta's Dash off, so the headset goes to Atrium's dash (home) too. Asked once
             // per run: if Windows says no, games still ask again when they start.
-            if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::dash_off() && !asked_dash_off {
+            // Not in mix & match: Meta's runtime isn't used then.
+            if !mix_on && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::dash_off() && !asked_dash_off {
                 asked_dash_off = true;
                 match meta_runtime::turn_dash_off() {
                     Ok(()) => dash::restart_home(),
@@ -199,6 +224,7 @@ impl App {
                 if s.running.as_ref().is_some_and(|r| !sys::processes().contains(&r.exe)) {
                     s.running = None;
                 }
+                s.mix = Some(mix_state);
             }
             app.push();
             std::thread::sleep(Duration::from_secs(5));
@@ -415,6 +441,37 @@ impl App {
         Some(d)
     }
 
+    /// Refresh the Mix & match tab now (sensordriver runs, so off the UI thread).
+    fn refresh_mix(self: &Arc<Self>) {
+        self.spawn(|app| {
+            let rift = app.st().hw.as_ref().is_some_and(meta_runtime::needed);
+            let state = mix::state(rift);
+            app.st().mix = Some(state);
+            app.push();
+        });
+    }
+
+    /// One Mix & match step that may ask Windows for admin: one at a time, shown as busy.
+    fn mix_step(self: &Arc<Self>, which: &'static str, done: &'static str, f: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        {
+            let mut s = self.st();
+            if s.mix_busy.is_some() {
+                return;
+            }
+            s.mix_busy = Some(which);
+        }
+        self.push();
+        self.spawn(move |app| {
+            let r = f();
+            app.st().mix_busy = None;
+            app.notice(match r {
+                Ok(()) => done.to_string(),
+                Err(e) => e,
+            });
+            app.refresh_mix();
+        });
+    }
+
     fn game(&self, id: &str) -> Option<Game> {
         self.st().games.iter().find(|g| g.id == id).cloned()
     }
@@ -483,7 +540,8 @@ impl App {
                         if g.installed && cfg!(target_os = "linux") && atrium_service::available() {
                             atrium_service::prepare()?;
                         }
-                        let wired = cfg!(windows) && app.st().hw.as_ref().is_some_and(meta_runtime::needed);
+                        // With Mix & match on, a Rift on USB is only lending its Touches.
+                        let wired = cfg!(windows) && !app.st().settings.mix.enabled && app.st().hw.as_ref().is_some_and(meta_runtime::needed);
                         if g.installed && wired {
                             let starting = !meta_runtime::running();
                             if starting {
@@ -496,7 +554,7 @@ impl App {
                             // it was just started: otherwise the hardware loop's state is current).
                             if starting {
                                 let hw = headsets::detect();
-                                let st = rt::state(&hw);
+                                let st = rt::state(&hw, false);
                                 let mut s = app.st();
                                 s.hw = Some(hw);
                                 s.rt = Some(st);
@@ -716,6 +774,40 @@ impl App {
                 Ok(()) => app.notice("Starting the simulated Steam Frame"),
                 Err(e) => app.notice(e),
             }),
+            "mixSet" => {
+                let on = m["enabled"].as_bool().unwrap_or(false);
+                {
+                    let mut s = self.st();
+                    s.settings.mix.enabled = on;
+                    s.settings.mix.controllers = "cv1".into();
+                    s.settings.save();
+                }
+                if on {
+                    // Meta's runtime would fight Atrium's tracking service for the Rift's radio.
+                    meta_runtime::stop();
+                } else {
+                    mix::stop_service();
+                }
+                self.notice(if on { "Mix & match on: games get your CV1 Touches once they're calibrated" } else { "Mix & match off: games get the headset's own controllers" });
+                self.refresh_mix();
+            }
+            "mixSetupSensors" => self.mix_step("sensors", "Rift sensors are ready for Atrium", mix::setup_sensors),
+            "mixRestoreSensors" => self.mix_step("sensors", "Rift sensors are back on Meta's driver", || {
+                mix::stop_service();
+                mix::restore_sensors()
+            }),
+            "mixStopMeta" => self.mix_step("meta", "Meta's service is off until you restart the PC", mix::stop_meta),
+            "mixRestartService" => self.mix_step("service", "Restarted Atrium's tracking service", || {
+                mix::stop_service();
+                mix::start_service()
+            }),
+            "mixCalibrate" => match mix::calibrate() {
+                Ok(()) => {
+                    self.notice("Calibrating in your game: with a Touch in each hand, move both hands around, turning your wrists, for 5 seconds");
+                    self.refresh_mix();
+                }
+                Err(e) => self.notice(e),
+            },
             "registerRuntime" => self.spawn(|app| match rt::register() {
                 Ok(()) => app.notice("Atrium is now the OpenXR runtime"),
                 Err(e) => app.notice(e),

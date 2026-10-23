@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -31,6 +32,8 @@
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
 #include <openxr/openxr_reflection.h>
+
+#include "touch.h"
 
 // ---- log ------------------------------------------------------------------------------------
 static std::mutex g_logLock;
@@ -142,6 +145,17 @@ static std::wstring BackendManifest()
 	return Widen(JsonString(cfg, "backend"));
 }
 
+// The CV1 Touch swap's source (touch.cpp): the Atrium service's runtime manifest, from
+// ATRIUM_XR_TOUCH, else runtime.json's "touch". Empty: the game keeps the backend's controllers.
+static std::wstring TouchManifest()
+{
+	wchar_t env[MAX_PATH];
+	DWORD n = GetEnvironmentVariableW(L"ATRIUM_XR_TOUCH", env, MAX_PATH);
+	if (n && n < MAX_PATH) return env;
+	std::string cfg = ReadFile(AtriumDir() + L"\\runtime.json");
+	return Widen(JsonString(cfg, "touch"));
+}
+
 static XrResult LoadBackend(const XrNegotiateLoaderInfo* loaderInfo)
 {
 	std::wstring manifest = BackendManifest();
@@ -208,6 +222,14 @@ template <typename F> static F Next(const char* name)
 // backend's own lookup (for calls Atrium makes itself), and the log.
 PFN_xrVoidFunction AtriumNext(const char* name) { return Next<PFN_xrVoidFunction>(name); }
 PFN_xrGetInstanceProcAddr AtriumBackendGipa() { return g_backendGipa; }
+// The backend's function, or the Touch swap's when it handles that call (mix & match).
+XRAPI_ATTR XrResult XRAPI_CALL AtriumLayeredGipa(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
+{
+	XrResult r = g_backendGipa(instance, name, function);
+	if (XR_SUCCEEDED(r) && *function && instance != XR_NULL_HANDLE)
+		if (PFN_xrVoidFunction hook = touch::Hook(name)) *function = hook;
+	return r;
+}
 void AtriumLog(const char* fmt, ...)
 {
 	char buf[1024];
@@ -267,9 +289,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateInstance(const XrInstanceCr
 {
 	auto next = Next<PFN_xrCreateInstance>("xrCreateInstance");
 	bool ovr = info && strncmp(info->applicationInfo.applicationName, kOvrPluginName, sizeof kOvrPluginName - 1) == 0;
-	if (!ovr) return next(info, instance);
+	if (!ovr && !touch::Configured()) return next(info, instance);
 
-	// OVRPlugin: make sure the time conversion is there for its time-0 queries.
+	// OVRPlugin and the Touch swap: make sure the time conversion is there (OVRPlugin's time-0
+	// queries; the Touch swap's clock between the backend and the Atrium service).
 	const char* convert = XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME;
 	std::vector<const char*> exts(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
 	bool has = false;
@@ -277,12 +300,18 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateInstance(const XrInstanceCr
 	XrInstanceCreateInfo ci = *info;
 	if (!has && BackendHasExtension(convert)) {
 		exts.push_back(convert);
-		ci.enabledExtensionCount = (uint32_t)exts.size();
-		ci.enabledExtensionNames = exts.data();
 		has = true;
 	}
+	// The Touch swap's calibration watches the hands holding the Touches (hand tracking).
+	const char* hands = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
+	if (touch::Configured() && std::none_of(exts.begin(), exts.end(), [&](const char* e) { return strcmp(e, hands) == 0; }) &&
+		BackendHasExtension(hands))
+		exts.push_back(hands);
+	ci.enabledExtensionCount = (uint32_t)exts.size();
+	ci.enabledExtensionNames = exts.data();
 	XrResult r = next(&ci, instance);
-	if (XR_SUCCEEDED(r)) {
+	if (XR_SUCCEEDED(r) && touch::Configured()) touch::OnInstanceCreated(*instance, g_backendGipa, OvrTime);
+	if (XR_SUCCEEDED(r) && ovr) {
 		{
 			std::lock_guard<std::mutex> lk(g_ovrLock);
 			g_ovrInstances[(uint64_t)*instance] = true;
@@ -297,6 +326,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateInstance(const XrInstanceCr
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrDestroyInstance(XrInstance instance)
 {
 	XrResult r = Next<PFN_xrDestroyInstance>("xrDestroyInstance")(instance);
+	if (XR_SUCCEEDED(r)) touch::OnInstanceDestroyed(instance);
 	if (XR_SUCCEEDED(r)) {
 		std::lock_guard<std::mutex> lk(g_ovrLock);
 		g_ovrInstances.erase((uint64_t)instance);
@@ -486,9 +516,14 @@ static const Wrap g_wraps[] = {
 
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
 {
-	XrResult r = g_backendGipa(instance, name, function);
+	// Layers, top down: Atrium's own wrappers (the dash, OVRPlugin, tracing), the Touch swap
+	// (mix & match: its wrappers call the backend themselves and handle OVRPlugin's time 0
+	// too), the backend.
+	XrResult r = AtriumLayeredGipa(instance, name, function);
 	if (XR_FAILED(r) || !*function) return r;
+	bool touchHooked = instance != XR_NULL_HANDLE && touch::Hook(name);
 	for (const Wrap& w : g_wraps) {
+		if (touchHooked && w.when != When::Always) break; // the swap handles OVRPlugin and its own calls
 		if (strcmp(name, w.name) != 0) continue;
 		if ((w.when == When::Trace && !g_trace) || (w.when == When::OvrPlugin && !IsOvrPlugin(instance))) break;
 		{
@@ -514,6 +549,7 @@ extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderRuntimeInt
 	if (!g_backendGipa) {
 		XrResult r = LoadBackend(loaderInfo);
 		if (XR_FAILED(r)) return r;
+		touch::Configure(TouchManifest(), Log);
 	}
 	runtimeRequest->runtimeInterfaceVersion = XR_CURRENT_LOADER_RUNTIME_VERSION;
 	runtimeRequest->runtimeApiVersion = XR_CURRENT_API_VERSION;

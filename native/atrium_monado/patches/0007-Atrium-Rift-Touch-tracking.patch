@@ -1,0 +1,420 @@
+From b6f34ad65fbb02b25199f881baa0203442c26fce Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:24:46 +0100
+Subject: [PATCH 7/7] Atrium: Rift Touch position tracking through the
+ constellation tracker
+
+The Touch calibration's LED points (relative to the IMU, as OpenHMD uses them)
+become a constellation LED model; each Touch joins the HMD's tracker once its
+calibration is in. Pose = IMU rotation turned onto the cameras' frame (slow
+slerp toward each optical rotation) + optical position, held 2 s when lost.
+---
+ src/xrt/drivers/rift/rift_driver.c   |   8 +
+ src/xrt/drivers/rift/rift_internal.h |  26 +++
+ src/xrt/drivers/rift/rift_radio.c    | 285 ++++++++++++++++++++++++++-
+ 3 files changed, 312 insertions(+), 7 deletions(-)
+
+diff --git a/src/xrt/drivers/rift/rift_driver.c b/src/xrt/drivers/rift/rift_driver.c
+index 489ca1ddc..7419b60f7 100644
+--- a/src/xrt/drivers/rift/rift_driver.c
++++ b/src/xrt/drivers/rift/rift_driver.c
+@@ -1561,6 +1561,14 @@ rift_add_to_constellation_tracker(struct rift_hmd *hmd, struct t_constellation_t
+ 	hmd->base.tracking_origin = tracking_origin;
+ 	hmd->constellation_imu_sink = params.imu_sink;
+ 
++	// Atrium: radio devices made before this share the HMD's space; the Touches join the tracker themselves once
++	// their calibration is in (rift_radio.c).
++	os_mutex_lock(&hmd->device_mutex);
++	for (int i = 0; i < hmd->device_count; i++) {
++		hmd->devices[i]->tracking_origin = tracking_origin;
++	}
++	os_mutex_unlock(&hmd->device_mutex);
++
+ 	// Mark that we're using constellation poses now
+ 	hmd->use_constellation_poses = true;
+ 
+diff --git a/src/xrt/drivers/rift/rift_internal.h b/src/xrt/drivers/rift/rift_internal.h
+index 468b8fb1a..d6e48d0a1 100644
+--- a/src/xrt/drivers/rift/rift_internal.h
++++ b/src/xrt/drivers/rift/rift_internal.h
+@@ -778,6 +778,32 @@ struct rift_touch_controller
+ 		} haptic;
+ 	} input;
+ 
++	/*!
++	 * Optical tracking through the HMD's constellation tracker (Atrium). The tracker reports the pose of the IMU
++	 * frame; rotation comes from the IMU fusion, turned by @ref correction so it agrees with the cameras, and
++	 * position comes from the cameras.
++	 */
++	struct
++	{
++		//! Set once by the radio thread after the device was added (or adding failed).
++		bool add_attempted;
++		bool added;
++
++		struct t_constellation_tracker_led_model led_model;
++		struct t_constellation_tracker_device device;
++		struct t_constellation_tracker_tracking_source tracking_source;
++		t_constellation_device_id_t device_id;
++
++		//! Thread safe: IMU fusion orientation at each IMU sample, so optical samples can be matched in time.
++		struct m_relation_history *imu_hist;
++		//! Thread safe: raw optical poses of the IMU frame.
++		struct m_relation_history *optical_hist;
++
++		//! Locked by input.mutex: world-from-fusion rotation, valid after the first optical pose.
++		bool have_correction;
++		struct xrt_quat correction;
++	} tracking;
++
+ 	//! Locked by radio_state.thread
+ 	struct
+ 	{
+diff --git a/src/xrt/drivers/rift/rift_radio.c b/src/xrt/drivers/rift/rift_radio.c
+index 289488020..2bacd8a85 100644
+--- a/src/xrt/drivers/rift/rift_radio.c
++++ b/src/xrt/drivers/rift/rift_radio.c
+@@ -13,6 +13,9 @@
+ #include "util/u_var.h"
+ #include "util/u_file.h"
+ 
++#include "math/m_relation_history.h"
++#include "math/m_vec3.h"
++
+ #include "rift_internal.h"
+ #include "rift_radio.h"
+ #include "rift_bindings.h"
+@@ -32,6 +35,250 @@ rift_update_input(struct xrt_device *device, size_t index, union xrt_input_value
+  * Rift Touch Controller device functions
+  */
+ 
++/*
++ * Atrium: optical tracking of the Touch through the HMD's constellation tracker.
++ */
++
++//! An optical pose younger than this counts as tracked position.
++#define RIFT_TOUCH_OPTICAL_FRESH_NS (100 * U_TIME_1MS_IN_NS)
++//! The last optical position is held (valid, not tracked) for this long after the cameras lose the Touch.
++#define RIFT_TOUCH_OPTICAL_HOLD_NS (2000 * U_TIME_1MS_IN_NS)
++//! Only an optical pose this fresh is handed back to the tracker as the prior.
++#define RIFT_TOUCH_PRIOR_MAX_AGE_NS (250 * U_TIME_1MS_IN_NS)
++//! Optical position is extrapolated at most this far past the last optical pose.
++#define RIFT_TOUCH_MAX_PREDICT_NS (50 * U_TIME_1MS_IN_NS)
++//! How far each optical pose pulls the IMU rotation towards the cameras' rotation.
++#define RIFT_TOUCH_CORRECTION_ALPHA 0.05f
++
++/*!
++ * The Touch pose: IMU rotation turned into the cameras' frame, with the cameras' position. Before the first optical
++ * pose this is the plain IMU rotation, as before Atrium added optical tracking.
++ */
++static bool
++rift_touch_controller_get_fused_relation(struct rift_touch_controller *controller,
++                                         int64_t at_timestamp_ns,
++                                         bool for_prior,
++                                         struct xrt_space_relation *out_relation)
++{
++	struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
++	struct xrt_quat imu_orientation;
++	struct xrt_vec3 angular_velocity;
++
++	os_mutex_lock(&controller->input.mutex);
++	int ret = imu_fusion_get_prediction(controller->input.imu_fusion, (uint64_t)at_timestamp_ns, &imu_orientation,
++	                                    &angular_velocity);
++	bool have_correction = controller->tracking.have_correction;
++	struct xrt_quat correction = controller->tracking.correction;
++	os_mutex_unlock(&controller->input.mutex);
++
++	if (ret != 0) {
++		return false;
++	}
++
++	if (!have_correction) {
++		if (for_prior) {
++			return false;
++		}
++		relation.pose.orientation = imu_orientation;
++		relation.angular_velocity = angular_velocity;
++		relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
++		                          XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++		                          XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++		*out_relation = relation;
++		return true;
++	}
++
++	math_quat_rotate(&correction, &imu_orientation, &relation.pose.orientation);
++	math_quat_rotate_vec3(&correction, &angular_velocity, &relation.angular_velocity);
++	relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++	                          XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
++
++	int64_t latest_ns;
++	struct xrt_space_relation latest;
++	if (m_relation_history_get_latest(controller->tracking.optical_hist, &latest_ns, &latest)) {
++		int64_t age_ns = at_timestamp_ns - latest_ns;
++		int64_t max_age_ns = for_prior ? RIFT_TOUCH_PRIOR_MAX_AGE_NS : RIFT_TOUCH_OPTICAL_HOLD_NS;
++
++		if (age_ns <= max_age_ns) {
++			int64_t query_ns = age_ns > RIFT_TOUCH_MAX_PREDICT_NS ? latest_ns + RIFT_TOUCH_MAX_PREDICT_NS
++			                                                      : at_timestamp_ns;
++			struct xrt_space_relation optical = latest;
++			m_relation_history_get(controller->tracking.optical_hist, query_ns, &optical);
++
++			relation.pose.position = optical.pose.position;
++			relation.relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
++
++			if (age_ns <= RIFT_TOUCH_OPTICAL_FRESH_NS) {
++				relation.relation_flags |= XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
++				if (optical.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT) {
++					relation.linear_velocity = optical.linear_velocity;
++					relation.relation_flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
++				}
++			}
++		}
++	}
++
++	if (for_prior && (relation.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) == 0) {
++		return false;
++	}
++
++	*out_relation = relation;
++	return true;
++}
++
++static void
++rift_touch_controller_push_constellation_sample(struct t_constellation_tracker_device *device,
++                                                struct t_constellation_tracker_sample *sample)
++{
++	struct rift_touch_controller *controller =
++	    container_of(device, struct rift_touch_controller, tracking.device);
++
++	struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
++	relation.pose = sample->pose;
++	relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
++	                          XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT;
++
++	// Samples from several sensors may arrive slightly out of order, older ones are dropped here.
++	if (!m_relation_history_push_with_motion_estimation(controller->tracking.optical_hist, &relation,
++	                                                    sample->timestamp_ns)) {
++		return;
++	}
++
++	struct xrt_space_relation imu_relation;
++	if (m_relation_history_get(controller->tracking.imu_hist, sample->timestamp_ns, &imu_relation) ==
++	    M_RELATION_HISTORY_RESULT_INVALID) {
++		return;
++	}
++
++	// The rotation that takes the IMU fusion's frame onto the cameras' frame.
++	struct xrt_quat imu_inverse;
++	struct xrt_quat target;
++	math_quat_invert(&imu_relation.pose.orientation, &imu_inverse);
++	math_quat_rotate(&sample->pose.orientation, &imu_inverse, &target);
++	math_quat_normalize(&target);
++
++	os_mutex_lock(&controller->input.mutex);
++	if (!controller->tracking.have_correction) {
++		controller->tracking.correction = target;
++		controller->tracking.have_correction = true;
++	} else {
++		struct xrt_quat blended;
++		math_quat_slerp(&controller->tracking.correction, &target, RIFT_TOUCH_CORRECTION_ALPHA, &blended);
++		math_quat_normalize(&blended);
++		controller->tracking.correction = blended;
++	}
++	os_mutex_unlock(&controller->input.mutex);
++}
++
++static void
++rift_touch_controller_get_constellation_prior(struct t_constellation_tracker_tracking_source *tracking_source,
++                                              int64_t when_ns,
++                                              struct xrt_space_relation *out_relation)
++{
++	struct rift_touch_controller *controller =
++	    container_of(tracking_source, struct rift_touch_controller, tracking.tracking_source);
++
++	struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
++	rift_touch_controller_get_fused_relation(controller, when_ns, true, &relation);
++	*out_relation = relation;
++}
++
++/*!
++ * Builds the tracker's LED model from the Touch calibration: the LED points, made relative to the IMU so the tracker
++ * reports the IMU frame. The Touch model is used as is (OpenHMD does the same); only the HMD's is turned around Y.
++ */
++static bool
++rift_touch_controller_build_led_model(struct rift_touch_controller *controller)
++{
++	struct rift_hmd *hmd = controller->hmd;
++	struct rift_touch_controller_calibration *c = &controller->input.calibration;
++
++	os_mutex_lock(&controller->input.mutex);
++
++	size_t led_count = c->num_leds;
++	if (led_count == 0 || led_count > XRT_CONSTELLATION_MAX_LEDS_PER_DEVICE) {
++		os_mutex_unlock(&controller->input.mutex);
++		HMD_ERROR(hmd, "Touch %d calibration has %zu LEDs, cannot track it", controller->device_type,
++		          led_count);
++		return false;
++	}
++
++	// The calibration is in meters; guard against a model in millimeters, which would never match.
++	float max_extent = 0.0f;
++	for (size_t i = 0; i < led_count; i++) {
++		struct xrt_vec3 p = m_vec3_sub(c->leds[i].position, c->imu_position);
++		max_extent = fmaxf(max_extent, fmaxf(fabsf(p.x), fmaxf(fabsf(p.y), fabsf(p.z))));
++	}
++	float scale = max_extent > 1.0f ? 0.001f : 1.0f;
++
++	struct t_constellation_tracker_led *leds = U_TYPED_ARRAY_CALLOC(struct t_constellation_tracker_led, led_count);
++	for (size_t i = 0; i < led_count; i++) {
++		struct xrt_vec3 normal = c->leds[i].normal;
++		math_vec3_normalize(&normal);
++
++		leds[i] = (struct t_constellation_tracker_led){
++		    .position = m_vec3_mul_scalar(m_vec3_sub(c->leds[i].position, c->imu_position), scale),
++		    .normal = normal,
++		    .radius_m = 0.0035f,                   // same as the HMD
++		    .visibility_angle = DEG_TO_RAD(80.0f), // TODO: tune on hardware
++		    .id = (t_constellation_led_id_it)i,
++		};
++	}
++
++	os_mutex_unlock(&controller->input.mutex);
++
++	controller->tracking.led_model = (struct t_constellation_tracker_led_model){
++	    .leds = leds,
++	    .led_count = led_count,
++	    .match_parameters =
++	        {
++	            .min_leds_for_correspondence_search_without_prior = 5,
++	            .min_leds_for_correspondence_search_with_prior = 4,
++	        },
++	};
++
++	HMD_INFO(hmd, "Touch %d LED model: %zu LEDs, %.1f mm from the IMU at most%s", controller->device_type,
++	         led_count, (double)(max_extent * scale * 1000.0f), scale != 1.0f ? " (scaled from mm)" : "");
++
++	return true;
++}
++
++/*!
++ * Adds the Touch to the HMD's constellation tracker once its calibration is in. Radio thread only.
++ */
++static void
++rift_touch_controller_try_add_to_constellation(struct rift_hmd *hmd, struct rift_touch_controller *controller)
++{
++	struct t_constellation_tracker *tracker = hmd->constellation_tracker;
++	if (controller->tracking.add_attempted || tracker == NULL || !controller->input.calibration_read) {
++		return;
++	}
++	controller->tracking.add_attempted = true;
++
++	if (!rift_touch_controller_build_led_model(controller)) {
++		return;
++	}
++
++	struct t_constellation_tracker_device_params params = {
++	    .led_model = controller->tracking.led_model,
++	    .tracking_source = &controller->tracking.tracking_source,
++	};
++
++	int ret = t_constellation_tracker_add_device(tracker, &params, &controller->tracking.device,
++	                                             &controller->tracking.device_id);
++	if (ret < 0) {
++		HMD_ERROR(hmd, "Failed to add Touch %d to the constellation tracker, reason %d", controller->device_type,
++		          ret);
++		return;
++	}
++
++	controller->base.tracking_origin = t_constellation_tracker_get_tracking_origin(tracker);
++	controller->tracking.added = true;
++
++	HMD_INFO(hmd, "Touch %d added to the constellation tracker as device %d", controller->device_type,
++	         controller->tracking.device_id);
++}
++
+ static xrt_result_t
+ rift_touch_controller_get_tracked_pose(struct xrt_device *xdev,
+                                        const enum xrt_input_name name,
+@@ -45,12 +292,7 @@ rift_touch_controller_get_tracked_pose(struct xrt_device *xdev,
+ 	case XRT_INPUT_TOUCH_AIM_POSE: {
+ 		struct xrt_space_relation relation = XRT_SPACE_RELATION_ZERO;
+ 
+-		if (imu_fusion_get_prediction(controller->input.imu_fusion, (uint64_t)at_timestamp_ns,
+-		                              &relation.pose.orientation, &relation.angular_velocity) == 0) {
+-			relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT |
+-			                          XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+-			                          XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT;
+-
++		if (rift_touch_controller_get_fused_relation(controller, at_timestamp_ns, false, &relation)) {
+ 			(*out_relation) = relation;
+ 		}
+ 		break;
+@@ -169,7 +411,15 @@ rift_touch_controller_get_battery_status(struct xrt_device *xdev,
+ 
+ void
+ rift_touch_controller_node_break_apart(struct xrt_frame_node *node)
+-{}
++{
++	struct rift_touch_controller *controller = rift_touch_controller_from_node(node);
++
++	if (controller->tracking.added && controller->hmd->constellation_tracker != NULL) {
++		t_constellation_tracker_remove_device(controller->hmd->constellation_tracker,
++		                                      controller->tracking.device_id);
++		controller->tracking.added = false;
++	}
++}
+ 
+ void
+ rift_touch_controller_node_destroy(struct xrt_frame_node *node)
+@@ -198,6 +448,10 @@ rift_touch_controller_node_destroy(struct xrt_frame_node *node)
+ 		imu_fusion_destroy(controller->input.imu_fusion);
+ 	}
+ 
++	m_relation_history_destroy(&controller->tracking.imu_hist);
++	m_relation_history_destroy(&controller->tracking.optical_hist);
++	free(controller->tracking.led_model.leds);
++
+ 	u_device_free(&controller->base);
+ }
+ 
+@@ -400,6 +654,13 @@ rift_touch_controller_create(struct rift_hmd *hmd,
+ 
+ 	controller->base.supported.battery_status = true;
+ 	controller->base.supported.orientation_tracking = true;
++	controller->base.supported.position_tracking = true;
++
++	controller->tracking.device.push_constellation_tracker_sample = rift_touch_controller_push_constellation_sample;
++	controller->tracking.tracking_source.get_tracked_pose = rift_touch_controller_get_constellation_prior;
++	controller->tracking.device_id = XRT_CONSTELLATION_INVALID_DEVICE_ID;
++	m_relation_history_create(&controller->tracking.imu_hist);
++	m_relation_history_create(&controller->tracking.optical_hist);
+ 
+ 	controller->base.binding_profile_count = touch_profile_bindings_count;
+ 	controller->base.binding_profiles = touch_profile_bindings;
+@@ -904,6 +1165,14 @@ rift_touch_controller_handle_radio_input_report(struct rift_hmd *hmd,
+ 	imu_fusion_incorporate_gyros_and_accelerometer(controller->input.imu_fusion, imu_sample.timestamp_ns, &gyro,
+ 	                                               &gyro_variance, &accel, &accel_variance, NULL);
+ 
++	// Kept so optical poses, which arrive late, can be compared with the IMU rotation at their own time.
++	struct xrt_space_relation imu_relation = XRT_SPACE_RELATION_ZERO;
++	if (imu_fusion_get_prediction(controller->input.imu_fusion, (uint64_t)imu_sample.timestamp_ns,
++	                              &imu_relation.pose.orientation, &imu_relation.angular_velocity) == 0) {
++		imu_relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
++		m_relation_history_push(controller->tracking.imu_hist, &imu_relation, imu_sample.timestamp_ns);
++	}
++
+ 	os_mutex_unlock(&controller->input.mutex);
+ }
+ 
+@@ -996,6 +1265,8 @@ rift_radio_handle_read(struct rift_hmd *hmd)
+ 				break;
+ 			}
+ 
++			rift_touch_controller_try_add_to_constellation(hmd, controller);
++
+ 			rift_touch_controller_handle_radio_input_report(hmd, controller, message, receive_ns);
+ 
+ 			break;
+-- 
+2.52.0.windows.1
+

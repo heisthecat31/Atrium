@@ -11,7 +11,11 @@
 #   cjson.dll, pthreadVCE3.dll
 #
 # Needs: Visual Studio (C++), the Vulkan SDK, git, Python. vcpkg is fetched into build\vcpkg.
-param([string]$VsDir = 'J:\vs2026')
+#
+# -Rift adds Atrium's own Rift CV1 drivers (rift, rift_sensor, the constellation tracker: patches
+# 0006-0007). Opt-in while they're tested: the service would otherwise open a Rift that Meta's
+# OVRServer is using. The sensors must be on WinUSB: native\out\sensordriver.exe winusb (admin).
+param([string]$VsDir = 'J:\vs2026', [switch]$Rift)
 # Native tools print progress on stderr; exit codes are checked instead (Windows PowerShell 5.1).
 $ErrorActionPreference = 'Continue'
 function Check([string]$what) { if ($LASTEXITCODE) { throw "$what failed ($LASTEXITCODE)" } }
@@ -72,6 +76,10 @@ if ($LASTEXITCODE) { git -C $Vcpkg fetch --quiet --depth 1 origin $VcpkgBaseline
 # Configure + build in a Visual Studio x64 environment. /Zc:__cplusplus: MSVC otherwise reports
 # C++98 and Monado falls back to <experimental/filesystem>, which newer toolsets removed.
 $ninja = Join-Path $VsDir 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
+# PS Sense is off: its LED tables don't compile with MSVC, and it's no use here.
+$RiftArgs = if ($Rift) {
+    '"-DVCPKG_MANIFEST_FEATURES=usb;constellation" -DXRT_BUILD_DRIVER_RIFT=ON -DXRT_BUILD_DRIVER_RIFT_SENSOR=ON -DXRT_BUILD_DRIVER_PSSENSE=OFF'
+} else { '' }
 $bat = Join-Path $Build 'configure.bat'
 Set-Content $bat -Encoding ascii -Value @"
 @echo off
@@ -85,7 +93,7 @@ cmake -S "$Src" -B "$Bin" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   -DBUILD_TESTING=OFF -DBUILD_DOC=OFF ^
   -DXRT_OXR_RUNTIME_SUFFIX=atrium -DXRT_IPC_MSG_SOCK_FILENAME=atrium_comp_ipc ^
   -DXRT_FEATURE_SERVICE=ON -DXRT_FEATURE_STEAMVR_PLUGIN=OFF -DXRT_FEATURE_OPENVR=OFF ^
-  -DXRT_BUILD_DRIVER_ATRIUM_STREAM=ON "-DATRIUM_ALVR_DIR=$AlvrOutCmake"
+  -DXRT_BUILD_DRIVER_ATRIUM_STREAM=ON "-DATRIUM_ALVR_DIR=$AlvrOutCmake" $RiftArgs
 if errorlevel 1 exit /b 1
 cmake --build "$Bin"
 "@
@@ -95,6 +103,10 @@ cmd /c "`"$bat`""; Check 'build'
 $t = Join-Path $Bin 'src\xrt\targets'
 Copy-Item "$t\openxr\openxr_atrium.dll", "$t\openxr\cjson.dll", "$t\openxr\pthreadVCE3.dll" $Out -Force
 Copy-Item "$t\service\monado-service.exe" (Join-Path $Out 'atrium-service.exe') -Force
+# The Rift drivers' libraries (Ceres, glog, gflags, metis, libusb, hidapi) sit next to the service.
+if ($Rift) {
+    Get-ChildItem "$t\service\*.dll" | Where-Object Name -ne 'vulkan-1.dll' | Copy-Item -Destination $Out -Force
+}
 Copy-Item (Join-Path $AlvrOut 'alvr_server_core.dll') $Out -Force
 Set-Content (Join-Path $Out 'atrium_openxr.json') -Encoding ascii -Value @'
 {

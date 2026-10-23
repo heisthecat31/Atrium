@@ -51,6 +51,11 @@ rem riftprobe: Atrium's own Rift CV1 access over HID (no Meta software): config 
 cl.exe /nologo /MT /O2 /EHsc /W3 /Foobj\ /Fe"out\riftprobe.exe" src\riftprobe.cpp
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+rem sensordriver: puts the Rift sensors on Windows' WinUSB (or back on Meta's driver), so
+rem Atrium's own sensor code can open them. The app runs it elevated, once per PC.
+cl.exe /nologo /MT /O2 /EHsc /W3 /DUNICODE /D_UNICODE /Foobj\ /Fe"out\sensordriver.exe" src\sensordriver.cpp
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
 rem riftdisplay: the headset ("specialized") displays Windows can hand to a VR runtime (WinRT)
 cl.exe /nologo /MT /O2 /EHsc /std:c++20 /W3 /Foobj\ /Fe"out\riftdisplay.exe" src\riftdisplay.cpp
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%

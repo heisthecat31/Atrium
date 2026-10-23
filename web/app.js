@@ -47,7 +47,7 @@ document.addEventListener('error', (e) => {
 }, true);
 
 // ---- sidebar ------------------------------------------------------------------------------
-const PAGES = [['library', 'Library', icon.library], ['devices', 'Devices', icon.devices], ['runtime', 'Runtime', icon.runtimes], ['accounts', 'Accounts', icon.accounts], ['settings', 'Settings', icon.settings]];
+const PAGES = [['library', 'Library', icon.library], ['devices', 'Devices', icon.devices], ['mix', 'Mix & match', icon.mix], ['runtime', 'Runtime', icon.runtimes], ['accounts', 'Accounts', icon.accounts], ['settings', 'Settings', icon.settings]];
 
 function primary() {
   const hs = S?.hw?.headsets || [];
@@ -289,6 +289,115 @@ function devices() {
   </div>`;
 }
 
+// ---- mix & match --------------------------------------------------------------------------
+// Any headset with any controllers you have. For now: Rift CV1 Touches (Atrium tracks them with
+// the Rift sensors) with a streamed headset like a Quest on Virtual Desktop (src/services/mix.rs).
+const SENSOR_KIND = { winusb: ['on', 'On Atrium\'s driver'], 'winusb-noguid': ['warn', 'Needs set-up'], meta: ['warn', 'On Meta\'s driver'], other: ['warn', 'Unknown driver'], none: ['warn', 'No driver'] };
+
+function step(ok, title, body, action = '') {
+  return `<div class="item"><i class="dot ${ok ? 'on' : 'warn'}"></i><div class="grow"><b>${title}</b><div class="sub-l">${body}</div></div>${action}</div>`;
+}
+
+function mix() {
+  const m = S.mix || {}, st = m.state, busy = m.busy;
+  const others = (S.hw?.headsets || []).filter((h) => !(h.family === 'rift' && h.via === 'USB'));
+  // Streamers running now (Atrium's own tracking service shows as "monado": not a headset).
+  const streams = (S.hw?.streaming || []).filter((s) => s.running && s.id !== 'monado');
+  const headset = others.find((h) => h.active) || others[0] || (streams[0] && { name: streams[0].name, via: 'streaming' });
+  const head = `<div class="head"><div><h1>Mix & match</h1><p class="lede">Use any headset with any controllers you have.</p></div><div class="grow"></div><span class="pill accent">Currently only Rift CV1 controllers</span></div>`;
+  if (!st) return `<div class="page">${head}<div class="empty">Checking your devices…</div></div>`;
+  const sensorsOk = st.sensors.length > 0 && st.sensors.every(([, k]) => k === 'winusb') && st.lpm_off;
+  const cal = st.calibration;
+  const btn = (cmd, label, primary = false, which = '') => `<button class="btn ${primary ? 'primary' : ''}" data-cmd="${cmd}" ${busy ? 'disabled' : ''}>${busy && busy === which ? 'Waiting for Windows…' : label}</button>`;
+  return `<div class="page">
+    ${head}
+    <div class="card">
+      <div class="row"><div class="grow"><h4>Headset</h4><p>${esc(headset ? `${headset.name} · ${headset.via}` : 'None found yet: start Virtual Desktop on your headset')}</p></div></div>
+      <div class="row"><div class="grow"><h4>Controllers</h4><p>${m.enabled ? 'Games get your Rift CV1 Touches instead of the headset\'s own controllers.' : 'Games get the headset\'s own controllers.'}</p></div>
+        <select class="input" id="mixcontrollers" style="width:240px">
+          <option value="own" ${m.enabled ? '' : 'selected'}>Headset's own controllers</option>
+          <option value="cv1" ${m.enabled ? 'selected' : ''}>Rift CV1 Touches</option>
+        </select></div>
+      ${st.available ? '' : '<div class="note">Atrium\'s tracking service isn\'t built yet: native\\atrium_monado\\build.ps1 -Rift, then native\\build.bat.</div>'}
+    </div>
+    <h2>Getting the Touches ready</h2>
+    <div class="card list steps">
+      ${step(!!headset, 'Headset connected', headset ? `${esc(headset.name)} (${esc(headset.via)}): games show on it.` : 'Start Virtual Desktop on your headset and connect to this PC. Games can\'t start without a headset.')}
+      ${step(st.rift, 'Rift CV1 headset on USB', 'The Touches talk to the PC through the Rift\'s radio. It only needs its USB cable; the display isn\'t used.')}
+      ${step(!st.meta_running, 'Meta\'s software off', st.meta_running ? 'Meta\'s runtime is running and fights Atrium for the Rift. It comes back when you restart the PC.' : 'Atrium drives the Rift itself.',
+        st.meta_running ? btn('mixStopMeta', 'Turn it off', true, 'meta') : '')}
+      ${step(sensorsOk, `Sensors on Atrium's driver${st.sensors.length ? ` (${st.sensors.length})` : ''}`,
+        st.sensors.length ? st.sensors.map(([, k]) => esc((SENSOR_KIND[k] || SENSOR_KIND.other)[1])).join(' · ') + (st.lpm_off ? '' : ' · USB power saving still on') : 'No Rift sensor plugged in.',
+        st.sensors.length ? (sensorsOk ? btn('mixRestoreSensors', 'Give back to Meta', false, 'sensors') : btn('mixSetupSensors', 'Set up sensors', true, 'sensors')) : '')}
+      ${step(st.service_running, 'Atrium\'s tracking service', st.service_running ? 'Running: tracking the Touches with your sensors.' : m.enabled ? (st.rift ? 'Starting…' : 'Starts when the Rift is plugged in.') : 'Starts when you pick Rift CV1 Touches above.',
+        st.service_running ? btn('mixRestartService', 'Restart', false, 'service') : '')}
+      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one with a Touch in each hand; when they buzz, move both hands around, turning your wrists, for 5 seconds.'
+        : cal ? `Lined up with your headset's ${esc(cal.reference)} space, ${(cal.error_mm / 10).toFixed(1)} cm off on average (${ago(cal.when).toLowerCase()}).`
+        : 'Lines the Touches up with your headset, once; no other controllers needed (the headset\'s hand tracking sees your hands). In a game, with a Touch in each hand: press X, Y, A and B together (or Calibrate here), then move both hands around, turning your wrists, for 5 seconds. A short buzz means done.',
+        m.enabled ? btn('mixCalibrate', cal ? 'Calibrate again' : 'Calibrate', !cal) : '')}
+    </div>
+    <h2>What the sensors see</h2>
+    <div class="card">
+      <div class="row"><div class="grow"><p>A live picture from each sensor, brightened so you can see the room. Point them so they see where you play; the Touches' lights show as bright dots.</p></div>
+        <span class="toggle ${view.on ? 'on' : ''}" id="viewtoggle"><i></i>Live view</span></div>
+      <div class="row"><label class="grow-0">Brightness</label><input type="range" id="viewgain" min="1" max="64" value="${view.gain}" style="width:240px"></div>
+      <div class="views" id="views">${view.on ? '' : '<p class="sub-l">Turn on the live view to see what each sensor sees.</p>'}</div>
+    </div>
+  </div>`;
+}
+
+// The live sensor view: polls /sensor-view (ui.rs) for each sensor about 30 times a second while
+// the tab is open and the view is on, and draws the picture brightened.
+const view = { on: false, gain: 12, running: false, lut: null, lutGain: 0 };
+
+function viewLut() {
+  if (view.lutGain === view.gain) return view.lut;
+  const lut = new Uint8ClampedArray(256);
+  for (let v = 0; v < 256; v++) lut[v] = 255 * Math.sqrt(Math.min(1, (v / 255) * view.gain));
+  view.lut = lut; view.lutGain = view.gain;
+  return lut;
+}
+
+async function viewFrame(i) {
+  const r = await fetch(`/sensor-view?i=${i}`, { cache: 'no-store' }).catch(() => null);
+  const box = $('#views');
+  let wrap = box && box.querySelector(`[data-view="${i}"]`);
+  if (!r || !r.ok) { wrap?.remove(); return false; }
+  const buf = new DataView(await r.arrayBuffer());
+  const w = buf.getUint32(0, true), h = buf.getUint32(4, true);
+  const serial = new TextDecoder().decode(new Uint8Array(buf.buffer, 8, 32)).replace(/\0.*$/, '');
+  if (!box) return true;
+  if (!wrap) {
+    box.querySelector('p')?.remove();
+    wrap = document.createElement('figure');
+    wrap.dataset.view = i;
+    wrap.innerHTML = `<canvas width="${w}" height="${h}"></canvas><figcaption></figcaption>`;
+    box.append(wrap);
+  }
+  wrap.querySelector('figcaption').textContent = `Sensor ${i + 1} · ${serial}`;
+  const c = wrap.querySelector('canvas');
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  const px = new Uint8Array(buf.buffer, 40, w * h), out = img.data, lut = viewLut();
+  for (let p = 0, o = 0; p < px.length; p++, o += 4) { const v = lut[px[p]]; out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255; }
+  ctx.putImageData(img, 0, 0);
+  return true;
+}
+
+async function viewLoop() {
+  if (view.running) return;
+  view.running = true;
+  while (view.on && ui.page === 'mix') {
+    const t = performance.now();
+    const got = await Promise.all([0, 1, 2, 3].map(viewFrame));
+    const box = $('#views');
+    if (box && !got.some(Boolean) && !box.querySelector('p')) box.innerHTML = '<p class="sub-l">No picture yet: the sensors stream while Atrium\'s tracking service runs (pick Rift CV1 Touches above).</p>';
+    await new Promise((res) => setTimeout(res, Math.max(0, 33 - (performance.now() - t))));
+  }
+  view.running = false;
+}
+
 // ---- runtime ------------------------------------------------------------------------------
 function runtime() {
   const rt = S.rt;
@@ -385,6 +494,7 @@ function pageSig() {
     case 'library': return JSON.stringify([S.games, Object.keys(S.downloads), S.vrOnly, S.busy.scanning, S.busy.refreshing, S.busy.launching, ui.search, ui.source, ui.selected]);
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
+    case 'mix': return JSON.stringify([S.mix, (S.hw?.headsets || []).map((h) => [h.name, h.via, h.active])]);
     case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
@@ -403,7 +513,8 @@ function render() {
   if (sig !== drawn.sig) {
     drawn.sig = sig;
     if (ui.page === 'library') libraryBody();
-    else main.innerHTML = { devices, runtime, accounts, settings }[ui.page]();
+    else main.innerHTML = { devices, mix, runtime, accounts, settings }[ui.page]();
+    if (ui.page === 'mix' && view.on) viewLoop();
   }
   renderDrawer();
   paintDownloads();
@@ -413,7 +524,7 @@ function go(page) { ui.page = page; if (page !== 'library') ui.selected = null; 
 
 // ---- events -------------------------------------------------------------------------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],[data-download],[data-cancel-dl],[data-remove-dl],[data-use-version],#vr,#autostart,#refresh,#savekey,#pickdl');
+  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],[data-download],[data-cancel-dl],[data-remove-dl],[data-use-version],#vr,#autostart,#refresh,#savekey,#pickdl,#viewtoggle');
   if (!t) return;
   const d = t.dataset;
   if (d.url !== undefined) { e.preventDefault(); send('openUrl', { url: t.href }); }
@@ -439,15 +550,26 @@ document.addEventListener('click', (e) => {
   else if (t.id === 'autostart') send('setAutostart', { on: !S.autostart });
   else if (t.id === 'refresh') send('refresh');
   else if (t.id === 'pickdl') send('pickDownloadDir');
+  else if (t.id === 'viewtoggle') {
+    view.on = !view.on;
+    t.classList.toggle('on', view.on);
+    const box = $('#views');
+    if (box) box.innerHTML = view.on ? '' : '<p class="sub-l">Turn on the live view to see what each sensor sees.</p>';
+    if (view.on) viewLoop();
+  }
   else if (t.id === 'savekey') { const k = $('#apikey'); send('saveApiKey', { key: k.value }); k.value = ''; }
 });
 document.addEventListener('dblclick', (e) => { const g = e.target.closest('.game'); if (g) send('launch', { id: g.dataset.game }); });
-document.addEventListener('input', (e) => { if (e.target.id === 'q') { ui.search = e.target.value; render(); } });
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'q') { ui.search = e.target.value; render(); }
+  if (e.target.id === 'viewgain') view.gain = Number(e.target.value);
+});
 document.addEventListener('change', (e) => {
   if (e.target.id === 'mode') send('setMode', { id: ui.selected, mode: e.target.value });
   if (e.target.id === 'version') { const g = S.games.find((x) => x.id === ui.selected); if (g) { ui.version[g.app_id] = e.target.value; render(); } }
   if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
   if (e.target.id === 'mirroreye') send('setMirrorEye', { value: e.target.value });
+  if (e.target.id === 'mixcontrollers') send('mixSet', { enabled: e.target.value === 'cv1' });
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.selected) { ui.selected = null; render(); }

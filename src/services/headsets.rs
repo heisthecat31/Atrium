@@ -100,7 +100,8 @@ const USB_ACCESSORIES: &[(&str, &str, &str)] = &[
     ("28de", "2000", "Lighthouse receiver"),
 ];
 const STREAMERS: &[(&str, &str, &[&str])] = &[
-    ("virtualdesktop", "Virtual Desktop", &["virtualdesktop.streamer.exe", "virtualdesktop.service.exe"]),
+    // Only the Streamer: Virtual Desktop's service runs all the time, headset connected or not.
+    ("virtualdesktop", "Virtual Desktop", &["virtualdesktop.streamer.exe"]),
     ("alvr", "ALVR", &["alvr dashboard.exe", "alvr_dashboard.exe", "alvr_dashboard"]),
     ("steamlink", "Steam Link", &["steamlinkvr.exe"]),
     ("wivrn", "WiVRn", &["wivrn-server"]),

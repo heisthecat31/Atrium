@@ -25,6 +25,19 @@ pub fn running() -> bool {
     sys::processes().contains("ovrserver_x64.exe")
 }
 
+/// Close OVRServer. Works without admin when Atrium started it; one Meta's service started needs
+/// the service stopped instead (services/mix.rs stop_meta).
+#[cfg(windows)]
+pub fn stop() {
+    if running() {
+        sys::output("taskkill.exe", &["/IM", "OVRServer_x64.exe", "/F"]);
+        sys::log("meta runtime: stopped OVRServer");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn stop() {}
+
 /// Close Meta's extras that are running, if OVRServer is. Returns the ones closed.
 #[cfg(windows)]
 pub fn strip() -> Vec<&'static str> {

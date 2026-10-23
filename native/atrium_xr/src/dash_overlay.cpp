@@ -33,16 +33,17 @@
 #include "dash_overlay.h"
 
 PFN_xrVoidFunction AtriumNext(const char* name);
-PFN_xrGetInstanceProcAddr AtriumBackendGipa();
+XRAPI_ATTR XrResult XRAPI_CALL AtriumLayeredGipa(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
 void AtriumLog(const char* fmt, ...);
 
 template <typename F> static F NextFn(const char* name) { return (F)AtriumNext(name); }
 
-// The backend's function for calls the dash makes itself (not seen by Atrium's wrappers).
+// The function for calls the dash makes itself: past Atrium's own wrappers, but through the
+// Touch swap when it's on (so the dash's pointer and buttons are the CV1 Touches too).
 template <typename F> static F Backend(XrInstance instance, const char* name)
 {
 	PFN_xrVoidFunction f = nullptr;
-	AtriumBackendGipa()(instance, name, &f);
+	AtriumLayeredGipa(instance, name, &f);
 	return (F)f;
 }
 #define BK(inst, fn) Backend<PFN_##fn>(inst, #fn)

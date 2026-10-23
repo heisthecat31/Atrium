@@ -116,14 +116,20 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 
 /// Pick the backend for what's connected. Order matters: a Rift on USB → Meta, a Lighthouse
-/// headset → SteamVR, a running streamer → that streamer, then whatever is left.
-pub fn state(hw: &Hardware) -> RuntimeState {
+/// headset → SteamVR, a running streamer → that streamer, then whatever is left. With Mix &
+/// match on (`rift_is_controllers`) a Rift on USB only lends its Touches, so it doesn't count.
+pub fn state(hw: &Hardware, rift_is_controllers: bool) -> RuntimeState {
     let (files, active) = vendor_manifests();
     let backends: Vec<Backend> = files.iter().filter_map(|f| classify(f).map(|(id, label)| Backend { id, label, manifest: f.clone() })).collect();
     let find = |id: &str| backends.iter().find(|b| b.id == id).cloned();
     let usb = |vendor: &str| hw.headsets.iter().any(|h| h.via == "USB" && h.vendor == vendor);
     let streaming = |id: &str| hw.streaming.iter().any(|s| s.id == id && s.running);
-    let (chosen, reason) = if (usb("Oculus") || usb("Meta") || hw.meta.as_ref().is_some_and(|m| m.hmd_present)) && find("meta").is_some() {
+    let meta_headset = if rift_is_controllers {
+        hw.headsets.iter().any(|h| h.via == "USB" && (h.vendor == "Oculus" || h.vendor == "Meta") && h.family != "rift")
+    } else {
+        usb("Oculus") || usb("Meta") || hw.meta.as_ref().is_some_and(|m| m.hmd_present)
+    };
+    let (chosen, reason) = if meta_headset && find("meta").is_some() {
         (find("meta"), "Meta headset connected".to_string())
     } else if (usb("Valve") || usb("HTC") || usb("Bigscreen") || usb("Pimax")) && find("steamvr").is_some() {
         (find("steamvr"), "Lighthouse headset connected".to_string())
@@ -143,13 +149,17 @@ pub fn state(hw: &Hardware) -> RuntimeState {
     RuntimeState { manifest, system_active: active, registered, backends, chosen, reason }
 }
 
-/// Tell the runtime which backend to use for the next session.
-pub fn write_backend(s: &RuntimeState) {
-    let j = serde_json::json!({
+/// Tell the runtime which backend to use for the next session, and (Mix & match) where the
+/// controllers come from: `touch` is the tracking service's manifest for the CV1 Touch swap.
+pub fn write_backend(s: &RuntimeState, touch: Option<&Path>) {
+    let mut j = serde_json::json!({
         "backend": s.chosen.as_ref().map(|b| b.manifest.to_string_lossy().into_owned()),
         "backendId": s.chosen.as_ref().map(|b| b.id),
         "reason": s.reason,
     });
+    if let Some(t) = touch {
+        j["touch"] = serde_json::json!(t.to_string_lossy());
+    }
     let p = sys::data_dir().join("runtime.json");
     let old = std::fs::read_to_string(&p).unwrap_or_default();
     let new = serde_json::to_string_pretty(&j).unwrap_or_default();
