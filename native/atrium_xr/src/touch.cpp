@@ -597,19 +597,27 @@ XrVector3f RotVec(XrQuaternionf q)
 double SolveCalibration(const std::vector<Sample>& s, XrPosef* z)
 {
 	double S[3][3] = {};
-	int pairs = 0;
+	int pairs = 0, turned = 0;
+	double mismatch = 0;
 	for (size_t i = 0; i + 8 < s.size(); i++) {
 		size_t j = i + 8;
 		XrVector3f a = RotVec(QMul(s[j].quest.orientation, QConj(s[i].quest.orientation)));
 		XrVector3f b = RotVec(QMul(s[j].touch.orientation, QConj(s[i].touch.orientation)));
 		double la = sqrt(a.x * a.x + a.y * a.y + a.z * a.z), lb = sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
-		if (la < 0.25 || fabs(la - lb) > 0.15) continue;   // too little turn, or the two disagree
+		if (la < 0.25) continue;   // too little turn to say anything
+		turned++;
+		mismatch += fabs(la - lb);
+		// The two turned by different amounts: not held together, or one is tracking badly (a hand
+		// holding a Touch tracks worse than a controller, so allow a quarter of the turn).
+		if (fabs(la - lb) > fmax(0.15, 0.25 * la)) continue;
 		double av[3] = { a.x, a.y, a.z }, bv[3] = { b.x, b.y, b.z };
 		for (int r = 0; r < 3; r++)
 			for (int c = 0; c < 3; c++) S[r][c] += bv[r] * av[c];
 		pairs++;
 	}
-	if (pairs < 20) return -1;
+	g_log("touch: calibration: %zu samples, %d turning pairs, %d agree, mean turn mismatch %.0f deg", s.size(), turned, pairs,
+		turned ? mismatch / turned * 57.3 : 0.0);
+	if (pairs < 15) return -1;
 	double N[4][4] = {
 		{ S[0][0] + S[1][1] + S[2][2], S[1][2] - S[2][1], S[2][0] - S[0][2], S[0][1] - S[1][0] },
 		{ S[1][2] - S[2][1], S[0][0] - S[1][1] - S[2][2], S[0][1] + S[1][0], S[2][0] + S[0][2] },
