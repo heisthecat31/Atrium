@@ -729,7 +729,7 @@ impl App {
             }),
             "mixCalibrate" => match mix::calibrate() {
                 Ok(()) => {
-                    self.notice("Calibration starts in the next game: hold the right Touch and the right headset controller together");
+                    self.notice("Calibrating in your game: hold the right Touch against the side of the headset and look around until it buzzes again");
                     self.refresh_mix();
                 }
                 Err(e) => self.notice(e),

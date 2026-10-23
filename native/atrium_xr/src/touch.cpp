@@ -10,10 +10,11 @@
 //   - places the Touches in the backend's space with a calibration: Touch tracking space ->
 //     the backend's STAGE (or LOCAL) space, saved in %APPDATA%\Atrium\touch_calibration.json.
 //
-// Calibrating: hold the right Touch and the right Quest controller together in one hand, then
-// click both Touch thumbsticks for 2 s (or create %APPDATA%\Atrium\touch_calibrate). The right
-// Touch buzzes; wave and turn your hand for ~8 s until it buzzes again. Until a calibration
-// exists the game keeps the backend's own controllers.
+// Calibrating needs no other controllers: hold the right Touch against the side of the headset,
+// click both Touch thumbsticks for 2 s (or create %APPDATA%\Atrium\touch_calibrate), and look
+// around (turn, nod, tilt) for ~8 s until the Touch buzzes again. The headset's own tracking and
+// the Touch's move together, which is all the solve needs. Until a calibration exists the game
+// keeps the backend's own input (its controllers, or hand tracking).
 #include "touch.h"
 
 #include <shlobj.h>
@@ -462,11 +463,8 @@ bool g_profileEvent = false;
 // Calibration: Touch tracking space -> g_ref.
 bool g_calibrated = false;
 XrPosef g_calib = kIdentity;
-// Atrium's own action set on the game's instance: the backend's controller grip poses, only
-// read while calibrating.
-XrActionSet g_calSet = XR_NULL_HANDLE;
-XrAction g_calGrip = XR_NULL_HANDLE;
-XrSpace g_calSpace[2] = {};
+// The headset (the game session's VIEW space), which calibration matches the Touch against.
+XrSpace g_viewSpace = XR_NULL_HANDLE;
 
 std::wstring AtriumFile(const wchar_t* name)
 {
@@ -537,6 +535,7 @@ void SaveCalibration(double errorMm, size_t samples)
 	fclose(f);
 }
 
+// quest: the headset as the backend tracks it (VIEW in g_ref); touch: the right Touch held to it.
 struct Sample { XrPosef quest, touch; };
 enum class Cal { Idle, Collecting } g_cal = Cal::Idle;
 std::vector<Sample> g_samples;
@@ -689,7 +688,7 @@ double SolveCalibration(const std::vector<Sample>& s, XrPosef* z)
 // Runs from the game's xrSyncActions. g_lock held.
 void CalibrationTick(XrTime syncTime)
 {
-	if (g_calSet == XR_NULL_HANDLE || g_session == XR_NULL_HANDLE || g_ref == XR_NULL_HANDLE) return;
+	if (g_viewSpace == XR_NULL_HANDLE || g_session == XR_NULL_HANDLE || g_ref == XR_NULL_HANDLE) return;
 	ULONGLONG now = GetTickCount64();
 
 	if (g_cal == Cal::Idle) {
@@ -707,7 +706,7 @@ void CalibrationTick(XrTime syncTime)
 		g_cal = Cal::Collecting;
 		g_samples.clear();
 		g_calStart = now;
-		g_log("touch: calibrating, hold the right Touch and the right Quest controller together and move them");
+		g_log("touch: calibrating, hold the right Touch against the side of the headset and look around");
 		Buzz(1, 0.3f);
 		return;
 	}
@@ -718,7 +717,7 @@ void CalibrationTick(XrTime syncTime)
 		XrSpaceLocation q = { XR_TYPE_SPACE_LOCATION };
 		Sample smp;
 		XrSpaceLocationFlags tf = 0;
-		bool ok = QpcOf(syncTime, &qpc) && XR_SUCCEEDED(g_b.locate(g_calSpace[1], g_ref, syncTime, &q)) &&
+		bool ok = QpcOf(syncTime, &qpc) && XR_SUCCEEDED(g_b.locate(g_viewSpace, g_ref, syncTime, &q)) &&
 			(q.locationFlags & kPoseValid) == kPoseValid;
 		if (ok) {
 			std::lock_guard<std::mutex> lk(g_srcLock);
@@ -886,39 +885,20 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrCreateAction(XrActionSet set, const XrActionC
 XRAPI_ATTR XrResult XRAPI_CALL W_xrSuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* sb)
 {
 	std::string profile = PathString(sb->interactionProfile);
-	std::vector<XrActionSuggestedBinding> all(sb->suggestedBindings, sb->suggestedBindings + sb->countSuggestedBindings);
 	{
 		std::lock_guard<std::mutex> lk(g_lock);
 		auto& list = g_suggested[profile];
 		list.clear();
-		for (const XrActionSuggestedBinding& b : all) list.push_back({ b.action, PathString(b.binding) });
+		for (uint32_t i = 0; i < sb->countSuggestedBindings; i++)
+			list.push_back({ sb->suggestedBindings[i].action, PathString(sb->suggestedBindings[i].binding) });
 	}
-	// Atrium's calibration action rides along on every profile the game suggests.
-	size_t own = all.size();
-	if (g_calGrip != XR_NULL_HANDLE) {
-		for (int h = 0; h < 2; h++) {
-			XrPath p = XR_NULL_PATH;
-			g_b.stringToPath(instance, h ? "/user/hand/right/input/grip/pose" : "/user/hand/left/input/grip/pose", &p);
-			all.push_back({ g_calGrip, p });
-		}
-	}
-	XrInteractionProfileSuggestedBinding mine = *sb;
-	mine.countSuggestedBindings = (uint32_t)all.size();
-	mine.suggestedBindings = all.data();
-	XrResult r = g_b.suggest(instance, &mine);
-	if (XR_FAILED(r) && all.size() != own) r = g_b.suggest(instance, sb);   // profile without grip poses
-	return r;
+	return g_b.suggest(instance, sb);
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL W_xrAttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* info)
 {
-	std::vector<XrActionSet> sets(info->actionSets, info->actionSets + info->countActionSets);
-	if (g_calSet != XR_NULL_HANDLE) sets.push_back(g_calSet);
-	XrSessionActionSetsAttachInfo mine = *info;
-	mine.countActionSets = (uint32_t)sets.size();
-	mine.actionSets = sets.data();
-	XrResult r = g_b.attach(session, &mine);
-	if (XR_FAILED(r)) return g_b.attach(session, info);
+	XrResult r = g_b.attach(session, info);
+	if (XR_FAILED(r)) return r;
 
 	std::lock_guard<std::mutex> lk(g_lock);
 	// The profile the Touches answer as: the game's own Touch bindings when it has them.
@@ -957,12 +937,8 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrAttachSessionActionSets(XrSession session, co
 		g_calibrated = false;
 	}
 	g_refStage = stage;
-	if (g_calSet != XR_NULL_HANDLE) {
-		for (int h = 0; h < 2; h++) {
-			XrActionSpaceCreateInfo s = { XR_TYPE_ACTION_SPACE_CREATE_INFO, nullptr, g_calGrip, g_handPath[h], kIdentity };
-			g_b.createActionSpace(session, &s, &g_calSpace[h]);
-		}
-	}
+	rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+	g_b.createReferenceSpace(session, &rci, &g_viewSpace);
 	g_profileEvent = g_calibrated;
 	g_log("touch: game bindings attached, Touches answer as %s%s", g_profile.empty() ? "(no bindings)" : g_profile.c_str(),
 		g_calibrated ? "" : " once calibrated");
@@ -990,12 +966,7 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrDestroySpace(XrSpace space)
 
 XRAPI_ATTR XrResult XRAPI_CALL W_xrSyncActions(XrSession session, const XrActionsSyncInfo* info)
 {
-	std::vector<XrActiveActionSet> sets(info->activeActionSets, info->activeActionSets + info->countActiveActionSets);
-	if (g_calSet != XR_NULL_HANDLE && session == g_session) sets.push_back({ g_calSet, XR_NULL_PATH });
-	XrActionsSyncInfo mine = *info;
-	mine.countActiveActionSets = (uint32_t)sets.size();
-	mine.activeActionSets = sets.data();
-	XrResult r = g_b.sync(session, &mine);
+	XrResult r = g_b.sync(session, info);
 	if (XR_FAILED(r)) return r;
 
 	HandState hands[2];
@@ -1185,7 +1156,7 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrDestroySession(XrSession session)
 		if (session == g_session) {
 			g_session = XR_NULL_HANDLE;
 			g_ref = XR_NULL_HANDLE;
-			g_calSpace[0] = g_calSpace[1] = XR_NULL_HANDLE;
+			g_viewSpace = XR_NULL_HANDLE;
 			g_actionSpaces.clear();
 			g_values.clear();
 			g_cal = Cal::Idle;
@@ -1269,19 +1240,6 @@ void OnInstanceCreated(XrInstance instance, PFN_xrGetInstanceProcAddr gipa, XrTi
 	g_b.stringToPath(instance, "/user/hand/left", &g_handPath[0]);
 	g_b.stringToPath(instance, "/user/hand/right", &g_handPath[1]);
 
-	XrActionSetCreateInfo asci = { XR_TYPE_ACTION_SET_CREATE_INFO };
-	strcpy_s(asci.actionSetName, "atrium_touch_calibration");
-	strcpy_s(asci.localizedActionSetName, "Atrium Touch calibration");
-	asci.priority = 0;
-	if (XR_SUCCEEDED(g_b.createActionSet(instance, &asci, &g_calSet))) {
-		XrActionCreateInfo aci = { XR_TYPE_ACTION_CREATE_INFO };
-		strcpy_s(aci.actionName, "controller_grip");
-		strcpy_s(aci.localizedActionName, "Controller grip");
-		aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
-		aci.countSubactionPaths = 2;
-		aci.subactionPaths = g_handPath;
-		if (XR_FAILED(g_b.createAction(g_calSet, &aci, &g_calGrip))) g_calSet = XR_NULL_HANDLE;
-	}
 	LoadCalibration();
 	std::lock_guard<std::mutex> lk(g_srcLock);
 	g_src.lastTry = GetTickCount64();
@@ -1293,8 +1251,6 @@ void OnInstanceDestroyed(XrInstance instance)
 	if (instance != g_inst) return;
 	std::lock_guard<std::mutex> lk(g_lock);
 	g_inst = XR_NULL_HANDLE;
-	g_calSet = XR_NULL_HANDLE;
-	g_calGrip = XR_NULL_HANDLE;
 	g_actions.clear();
 	g_suggested.clear();
 }

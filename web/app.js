@@ -331,9 +331,9 @@ function mix() {
         st.sensors.length ? (sensorsOk ? btn('mixRestoreSensors', 'Give back to Meta', false, 'sensors') : btn('mixSetupSensors', 'Set up sensors', true, 'sensors')) : '')}
       ${step(st.service_running, 'Atrium\'s tracking service', st.service_running ? 'Running: tracking the Touches with your sensors.' : m.enabled ? (st.rift ? 'Starting…' : 'Starts when the Rift is plugged in.') : 'Starts when you pick Rift CV1 Touches above.',
         st.service_running ? btn('mixRestartService', 'Restart', false, 'service') : '')}
-      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one, hold the right Touch and your right headset controller together, and wave and turn them until the Touch buzzes twice.'
+      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one, hold the right Touch against the side of the headset, and look around (turn, nod, tilt) until the Touch buzzes again.'
         : cal ? `Lined up with your headset's ${esc(cal.reference)} space, ${cal.error_mm.toFixed(1)} mm off on average (${ago(cal.when).toLowerCase()}).`
-        : 'Lines the Touches up with your headset, once. In a game: click both Touch thumbsticks for 2 s, or press Calibrate here.',
+        : 'Lines the Touches up with your headset, once; no other controllers needed. In a game: hold the right Touch against the side of the headset, click both Touch thumbsticks for 2 s (or press Calibrate here), then look around until it buzzes again.',
         m.enabled ? btn('mixCalibrate', cal ? 'Calibrate again' : 'Calibrate', !cal) : '')}
     </div>
     <h2>What the sensors see</h2>
