@@ -1,0 +1,83 @@
+From 3568c88c808c7e64d84b7973cf6b8b226322d939 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:11:41 +0100
+Subject: [PATCH 8/9] Atrium: Rift sensors over WinUSB on Windows
+
+Atrium puts the sensors on Windows' WinUSB (native/src/sensordriver.cpp), so no
+UsbDk and no kernel-driver detach on Windows. Fixes found bringing them up:
+- uvc_fs_enumerate_modes sized its array by the caller's count (0) and wrote one
+  mode past it; Windows' heap caught it (AddressSanitizer: uvc_driver.c:376).
+- WinUSB wants each isochronous transfer to fill whole 1 ms frames (a multiple
+  of 8 packets on high/SuperSpeed); round the per-transfer packet count up.
+---
+ src/xrt/drivers/rift_sensor/rift_sensor.c | 13 ++++---------
+ src/xrt/drivers/uvc/uvc_driver.c          |  9 +++++++--
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/src/xrt/drivers/rift_sensor/rift_sensor.c b/src/xrt/drivers/rift_sensor/rift_sensor.c
+index 580faf593..ab75d96ab 100644
+--- a/src/xrt/drivers/rift_sensor/rift_sensor.c
++++ b/src/xrt/drivers/rift_sensor/rift_sensor.c
+@@ -396,21 +396,16 @@ rift_sensor_context_create(struct rift_sensor_context **out_context, struct xrt_
+ 		goto fail;
+ 	}
+ 
+-#ifdef XRT_OS_WINDOWS
+-	// Atrium: on Windows Meta's driver owns the sensors. UsbDk lends them to libusb while they're
+-	// open and gives them back to Meta's driver afterwards, so no driver is swapped.
+-	ret = libusb_set_option(context->usb_ctx, LIBUSB_OPTION_USE_USBDK);
+-	if (ret < 0) {
+-		SENSOR_WARN(context, "UsbDk isn't installed (%d): Rift sensors need it or a WinUSB driver", ret);
+-	}
+-#endif
+-
++	// Atrium: on Windows the sensors are opened through WinUSB, which Atrium puts them on
++	// (native/src/sensordriver.cpp); there's no kernel driver to detach there.
++#ifndef XRT_OS_WINDOWS
+ 	if (!libusb_has_capability(LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER) ||
+ 	    !libusb_has_capability(LIBUSB_CAP_HAS_HID_ACCESS)) {
+ 		SENSOR_WARN(context,
+ 		            "libusb does not have expected capabilities,"
+ 		            "may not be able to access Rift sensors");
+ 	}
++#endif
+ 
+ 	libusb_device **devices = NULL;
+ 	ssize_t num_devices = libusb_get_device_list(context->usb_ctx, &devices);
+diff --git a/src/xrt/drivers/uvc/uvc_driver.c b/src/xrt/drivers/uvc/uvc_driver.c
+index 853e9dbf8..2fbe1ba80 100644
+--- a/src/xrt/drivers/uvc/uvc_driver.c
++++ b/src/xrt/drivers/uvc/uvc_driver.c
+@@ -367,7 +367,8 @@ uvc_fs_enumerate_modes(struct xrt_fs *xfs, struct xrt_fs_mode **out_modes, uint3
+ {
+ 	struct uvc_fs *fs = uvc_fs(xfs);
+ 
+-	*out_modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, *out_count);
++	// Atrium: one mode; the array was sized by the caller's *out_count (0) before, then written past.
++	*out_modes = U_TYPED_ARRAY_CALLOC(struct xrt_fs_mode, 1);
+ 	if ((*out_modes) == NULL) {
+ 		return XRT_ERROR_ALLOCATION;
+ 	}
+@@ -584,7 +585,8 @@ uvc_fs_create(libusb_context *usb_ctx,
+ 	stream->skip_frame_start = 0;
+ 
+ 	ret = libusb_set_auto_detach_kernel_driver(devh, 1);
+-	if (ret < 0) {
++	// Atrium: Windows has no kernel driver to detach (the device is on WinUSB already).
++	if (ret < 0 && ret != LIBUSB_ERROR_NOT_SUPPORTED) {
+ 		UVC_ERROR(stream, "could not detach uvcvideo driver, reason %d", ret);
+ 		goto error;
+ 	}
+@@ -647,6 +649,9 @@ uvc_fs_create(libusb_context *usb_ctx,
+ 	size_t num_packets = (stream->frame_size + packet_size - 1) / packet_size;
+ 	stream->num_transfers = (num_packets + 31) / 32;
+ 	num_packets = num_packets / stream->num_transfers;
++	// Atrium: WinUSB wants each isochronous transfer to fill whole 1 ms frames (8 microframes) on
++	// high/SuperSpeed devices; libusb on Windows rejects anything else. Harmless elsewhere.
++	num_packets = (num_packets + 7) / 8 * 8;
+ 
+ 	stream->transfer = malloc(stream->num_transfers * sizeof(*stream->transfer));
+ 	if (!stream->transfer) {
+-- 
+2.52.0.windows.1
+

@@ -14,7 +14,7 @@
 #
 # -Rift adds Atrium's own Rift CV1 drivers (rift, rift_sensor, the constellation tracker: patches
 # 0006-0007). Opt-in while they're tested: the service would otherwise open a Rift that Meta's
-# OVRServer is using. The sensors need UsbDk installed.
+# OVRServer is using. The sensors must be on WinUSB: native\out\sensordriver.exe winusb (admin).
 param([string]$VsDir = 'J:\vs2026', [switch]$Rift)
 # Native tools print progress on stderr; exit codes are checked instead (Windows PowerShell 5.1).
 $ErrorActionPreference = 'Continue'

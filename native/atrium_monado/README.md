@@ -57,14 +57,24 @@ Edit Monado in a checkout of the pinned commit, then regenerate with `git diff` 
 - `0004`-`0005`: the Atrium streaming driver and target.
 - `0006`: the Rift drivers on Windows (`build.ps1 -Rift`): a Windows HID backend
   (`os_hid_win32.c`, the hidraw semantics the drivers expect, no driver change), the prober opens
-  HID interfaces through it, sensors go through libusb + UsbDk, a `constellation` vcpkg feature
-  (Ceres), and the Windows config-dir file helper the Touch calibration cache uses.
+  HID interfaces through it, a `constellation` vcpkg feature (Ceres), and the Windows config-dir
+  file helper the Touch calibration cache uses.
 - `0007`: Touch position tracking. The Touch calibration's LED points (relative to the IMU, used
   as is, as in Jan Schmidt's OpenHMD work) become a constellation LED model; each Touch joins the
   HMD's tracker once its calibration is in. Pose = IMU rotation turned onto the cameras' frame
   (slow blend towards each optical rotation) + optical position, held 2 s when the cameras lose it.
-  Not yet tested on hardware. Multi-sensor room setup is still upstream's placeholder (every
-  sensor at the same pose), so use one sensor until that's written.
+  Multi-sensor room setup is still upstream's placeholder (every sensor at the same pose), so use
+  one sensor until that's written.
+- `0008`: the sensors over WinUSB on Windows. Atrium moves them onto Windows' own signed WinUSB
+  driver (`native/src/sensordriver.cpp`, admin once; `restore` gives them back to Meta's driver).
+  Fixes: an upstream heap overflow in `uvc_fs_enumerate_modes` (Windows' heap catches it), and
+  isochronous transfers rounded to whole 1 ms frames as WinUSB requires.
+- `0009`: Touch fixes from the first tracked run (2026-10-23, one sensor: left Touch tracked in
+  81% of samples, right 63%): skip empty radio messages (read as full trigger/grip), reject
+  implausible optical jumps, speed-limited extrapolation.
+
+Meta's OVRService (Automatic) starts OVRServer at boot; it fights Atrium's driver for the Rift
+radio (Touches stop answering), so it must not run while Atrium drives the Rift.
 
 ## Hardware access
 
