@@ -103,6 +103,10 @@ cmd /c "`"$bat`""; Check 'build'
 $t = Join-Path $Bin 'src\xrt\targets'
 Copy-Item "$t\openxr\openxr_atrium.dll", "$t\openxr\cjson.dll", "$t\openxr\pthreadVCE3.dll" $Out -Force
 Copy-Item "$t\service\monado-service.exe" (Join-Path $Out 'atrium-service.exe') -Force
+# The Rift drivers' libraries (Ceres, glog, gflags, metis, libusb, hidapi) sit next to the service.
+if ($Rift) {
+    Get-ChildItem "$t\service\*.dll" | Where-Object Name -ne 'vulkan-1.dll' | Copy-Item -Destination $Out -Force
+}
 Copy-Item (Join-Path $AlvrOut 'alvr_server_core.dll') $Out -Force
 Set-Content (Join-Path $Out 'atrium_openxr.json') -Encoding ascii -Value @'
 {

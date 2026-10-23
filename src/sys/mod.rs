@@ -20,6 +20,46 @@ pub fn output(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> String {
     cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
+/// Close a child process when Atrium ends, however it ends (Windows: a kill-on-close job that
+/// lives as long as Atrium).
+#[cfg(windows)]
+pub fn end_with_atrium(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let j = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if !j.is_null() {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);
+        }
+        j as usize
+    });
+    if job != 0 {
+        unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+    }
+}
+
+/// Run a program as administrator (Windows asks with UAC) and wait. Ok if it ran and exited 0.
+#[cfg(windows)]
+pub fn run_elevated(program: &Path, args: &str) -> Result<(), String> {
+    let ps = format!(
+        "$p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -WindowStyle Hidden -PassThru; exit $p.ExitCode",
+        program.display().to_string().replace('\'', "''"),
+        args.replace('\'', "''")
+    );
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-Command", &ps]);
+    no_window(&mut cmd);
+    let st = cmd.status().map_err(|e| e.to_string())?;
+    if st.success() { Ok(()) } else { Err("Windows didn't allow it, or it didn't finish".into()) }
+}
+
 pub fn no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {

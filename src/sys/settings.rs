@@ -23,6 +23,16 @@ pub struct Settings {
     pub download_dir: Option<String>,
     /// Meta games Atrium downloaded, by app id.
     pub meta_installs: HashMap<String, MetaInstall>,
+    /// Mix & match: another headset with these controllers (services/mix.rs).
+    pub mix: MixSettings,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MixSettings {
+    pub enabled: bool,
+    /// The controllers used instead of the headset's own: "cv1" (Rift CV1 Touches).
+    pub controllers: String,
 }
 
 /// A Meta game Atrium downloaded: every version kept, one folder each, one of them played.

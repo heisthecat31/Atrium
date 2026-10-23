@@ -291,3 +291,15 @@ select.input { padding-right: 30px; cursor: pointer; }
 .ver.on { background: rgba(79,214,156,.08); }
 .ver .grow, .field .row .grow { flex: 1; min-width: 0; }
 .field .row { display: flex; gap: 8px; align-items: center; }
+
+/* Mix & match */
+.steps .item { padding: 14px 0; align-items: flex-start; }
+.steps .item .dot { margin-top: 6px; }
+.steps .item .grow { flex: 1; min-width: 0; }
+.steps .item .btn { flex: none; }
+.sub-l { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.grow-0 { color: var(--muted); }
+.views { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+.views figure { margin: 0; }
+.views canvas { width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; background: #000; display: block; image-rendering: pixelated; }
+.views figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }

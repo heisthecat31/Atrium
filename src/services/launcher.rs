@@ -117,7 +117,7 @@ pub fn launch(game: &Game, settings: &mut Settings, rt: Option<&RuntimeState>) -
     }
     // The Atrium Runtime reads its backend when the game starts; make sure it's current.
     if let Some(st) = rt {
-        runtime::write_backend(st);
+        runtime::write_backend(st, crate::services::mix::touch_for(settings).as_deref());
     }
     let mode = mode(game, settings, rt);
     match mode {
