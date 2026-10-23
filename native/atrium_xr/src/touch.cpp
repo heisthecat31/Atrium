@@ -825,17 +825,30 @@ void HandTrackers(bool on)
 	}
 }
 
-// A hand's palm in g_ref, if the headset tracks it now.
+// What happened to each hand's samples during a calibration, for the log.
+struct CalDiag {
+	int tries = 0, noTracker = 0, locateFailed = 0, inactive = 0, palmInvalid = 0, palmUntracked = 0, palmOk = 0, touchFailed = 0,
+		touchUntracked = 0;
+	XrResult lastError = XR_SUCCESS;
+} g_diag[2];
+
+// A hand's palm in g_ref, if the headset has it now. Valid is enough: some runtimes (streamed
+// hand tracking) don't mark hand joints as tracked.
 bool Palm(int h, XrTime time, XrPosef* pose)
 {
-	if (g_handTracker[h] == XR_NULL_HANDLE) return false;
+	CalDiag& d = g_diag[h];
+	d.tries++;
+	if (g_handTracker[h] == XR_NULL_HANDLE) return d.noTracker++, false;
 	XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT];
 	XrHandJointLocationsEXT locs = { XR_TYPE_HAND_JOINT_LOCATIONS_EXT, nullptr, XR_FALSE, XR_HAND_JOINT_COUNT_EXT, joints };
 	XrHandJointsLocateInfoEXT li = { XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT, nullptr, g_ref, time };
-	if (XR_FAILED(g_b.locateHandJoints(g_handTracker[h], &li, &locs)) || !locs.isActive) return false;
+	XrResult r = g_b.locateHandJoints(g_handTracker[h], &li, &locs);
+	if (XR_FAILED(r)) return d.lastError = r, d.locateFailed++, false;
+	if (!locs.isActive) return d.inactive++, false;
 	const XrHandJointLocationEXT& p = joints[XR_HAND_JOINT_PALM_EXT];
-	const XrSpaceLocationFlags need = kPoseValid | XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-	if ((p.locationFlags & need) != need) return false;
+	if ((p.locationFlags & kPoseValid) != kPoseValid) return d.palmInvalid++, false;
+	if (!(p.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) d.palmUntracked++;
+	d.palmOk++;
 	*pose = p.pose;
 	return true;
 }
@@ -878,6 +891,7 @@ void CalibrationTick(XrTime syncTime)
 		HandTrackers(true);
 		g_track[0].clear();
 		g_track[1].clear();
+		g_diag[0] = g_diag[1] = CalDiag{};
 		g_cal = Cal::Collecting;
 		g_calStart = now;
 		g_log("touch: calibrating: move both hands around, turning the wrists, for 5 seconds");
@@ -895,8 +909,9 @@ void CalibrationTick(XrTime syncTime)
 				XrSpaceLocationFlags tf = 0;
 				if (!Palm(h, syncTime, &s.palm)) continue;
 				std::lock_guard<std::mutex> lk(g_srcLock);
-				if (SourceLocate(h, false, qpc, &s.touch, &tf, &s.angVel, &s.linVel) && (tf & XR_SPACE_LOCATION_POSITION_TRACKED_BIT))
-					g_track[h].push_back(s);
+				if (!SourceLocate(h, false, qpc, &s.touch, &tf, &s.angVel, &s.linVel)) g_diag[h].touchFailed++;
+				else if (!(tf & XR_SPACE_LOCATION_POSITION_TRACKED_BIT)) g_diag[h].touchUntracked++;
+				else g_track[h].push_back(s);
 			}
 		}
 	}
@@ -904,6 +919,13 @@ void CalibrationTick(XrTime syncTime)
 
 	g_cal = Cal::Idle;
 	HandTrackers(false);
+	for (int h = 0; h < 2; h++) {
+		const CalDiag& d = g_diag[h];
+		g_log("touch: calibration %s hand: %d tries, no tracker %d, locate failed %d (%d), hand not active %d, palm invalid %d, "
+			  "palm ok %d (untracked %d), Touch not located %d, Touch position not tracked %d, kept %zu",
+			h ? "right" : "left", d.tries, d.noTracker, d.locateFailed, (int)d.lastError, d.inactive, d.palmInvalid, d.palmOk,
+			d.palmUntracked, d.touchFailed, d.touchUntracked, g_track[h].size());
+	}
 	CalResult r = SolveCalibration(g_track);
 	g_log("touch: calibration: %zu + %zu samples, wrists turned %.0f deg, wobble %.4f, delay %+.0f ms, error %.1f cm, Touch %.0f cm from palm",
 		g_track[0].size(), g_track[1].size(), r.turned, r.spread, r.lag * 1000, r.rms * 100, r.reach * 100);
