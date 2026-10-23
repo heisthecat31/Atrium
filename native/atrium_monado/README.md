@@ -68,7 +68,10 @@ Edit Monado in a checkout of the pinned commit, then regenerate with `git diff` 
 - `0008`: the sensors over WinUSB on Windows. Atrium moves them onto Windows' own signed WinUSB
   driver (`native/src/sensordriver.cpp`, admin once; `restore` gives them back to Meta's driver).
   Fixes: an upstream heap overflow in `uvc_fs_enumerate_modes` (Windows' heap catches it), and
-  isochronous transfers rounded to whole 1 ms frames as WinUSB requires.
+  isochronous transfers rounded to whole 1 ms frames as WinUSB requires. `sensordriver winusb`
+  also turns the power plan's USB 3 link power management off (saved; `restore` puts it back): a
+  sensor behind a USB 3 hub can't wake its link, so its first request aborts and the hub resets
+  it. With it off both sensors stream (2026-10-23); together they drop <1% of frames, in pairs.
 - `0009`: Touch fixes from the first tracked run (2026-10-23, one sensor: left Touch tracked in
   81% of samples, right 63%): skip empty radio messages (read as full trigger/grip), reject
   implausible optical jumps, speed-limited extrapolation.

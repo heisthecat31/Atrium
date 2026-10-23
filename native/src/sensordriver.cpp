@@ -1,9 +1,11 @@
 // sensordriver: puts the Rift CV1 sensors on Windows' own WinUSB driver so Atrium's sensor code
 // (libusb) can open them, or gives them back to Meta's driver.
 //
-//   sensordriver status     one line per sensor: "<instance id> <driver inf> <winusb|meta|other>"
-//   sensordriver winusb     (admin) every sensor onto WinUSB
-//   sensordriver restore    (admin) every sensor back to the best driver Windows has (Meta's)
+//   sensordriver status     one line per sensor: "<instance id> <driver inf> <winusb|meta|other>",
+//                           then "usb3-lpm on|off"
+//   sensordriver winusb     (admin) every sensor onto WinUSB, USB 3 link power management off
+//   sensordriver restore    (admin) every sensor back to the best driver Windows has (Meta's),
+//                           USB 3 link power management back to what it was
 //
 // WinUSB comes from Windows' own signed package (C:\Windows\INF\winusb.inf, "WinUsb Device"),
 // chosen for the sensor the way Device Manager's "pick from a list" does: no driver of Atrium's
@@ -23,6 +25,12 @@
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "powrprof.lib")
+
+#include <powrprof.h>
+#include <shlobj.h>
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 
 // The sensor's one interface (vendor class); its parent composite device keeps Windows' driver.
 static const wchar_t kSensorId[] = L"USB\\VID_2833&PID_0211&MI_00";
@@ -32,6 +40,82 @@ static const wchar_t kUsbDeviceClass[] = L"{88BAE032-5A81-49f0-BC3D-A4FF138216D6
 static const wchar_t kInterfaceGuids[] = L"{6D0B3F4C-8E2A-4B71-A5C9-2F1E7D3B9A60}\0";
 
 struct Sensor { std::wstring id; std::wstring inf; };
+
+// USB 3 link power management (the power plan's "USB 3 Link Power Management"). With it on, a
+// sensor behind a USB 3 hub can't wake its link: the first request after setup is aborted and the
+// hub resets the port, so the sensor never answers (seen with a Genesys hub, 2026-10-23). Sensors
+// on the PC's own ports don't mind. "winusb" turns it off in the active plan and saves the old
+// value; "restore" puts it back.
+static const GUID kUsbSubgroup = { 0x2a737441, 0x1930, 0x4402, { 0x8d, 0x77, 0xb2, 0xbe, 0xbb, 0xa3, 0x08, 0xa3 } };
+static const GUID kUsb3Lpm = { 0xd4e98f31, 0x5ffe, 0x4ce1, { 0xbe, 0x31, 0x1b, 0x38, 0xb3, 0x84, 0xc0, 0x09 } };
+
+static std::wstring LpmSaveFile()
+{
+	PWSTR data = nullptr;
+	if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &data))) return {};
+	std::wstring dir = std::wstring(data) + L"\\Atrium";
+	CoTaskMemFree(data);
+	CreateDirectoryW(dir.c_str(), nullptr);
+	return dir + L"\\usb3_lpm_before.txt";
+}
+
+// The active plan's USB 3 LPM index (0 off .. 3 max savings) on AC and DC; false if unreadable.
+static bool ReadLpm(DWORD* ac, DWORD* dc)
+{
+	GUID* scheme = nullptr;
+	if (PowerGetActiveScheme(nullptr, &scheme) != ERROR_SUCCESS) return false;
+	bool ok = PowerReadACValueIndex(nullptr, scheme, &kUsbSubgroup, &kUsb3Lpm, ac) == ERROR_SUCCESS &&
+		PowerReadDCValueIndex(nullptr, scheme, &kUsbSubgroup, &kUsb3Lpm, dc) == ERROR_SUCCESS;
+	LocalFree(scheme);
+	return ok;
+}
+
+static bool WriteLpm(DWORD ac, DWORD dc)
+{
+	GUID* scheme = nullptr;
+	if (PowerGetActiveScheme(nullptr, &scheme) != ERROR_SUCCESS) return false;
+	bool ok = PowerWriteACValueIndex(nullptr, scheme, &kUsbSubgroup, &kUsb3Lpm, ac) == ERROR_SUCCESS &&
+		PowerWriteDCValueIndex(nullptr, scheme, &kUsbSubgroup, &kUsb3Lpm, dc) == ERROR_SUCCESS &&
+		PowerSetActiveScheme(nullptr, scheme) == ERROR_SUCCESS;
+	LocalFree(scheme);
+	return ok;
+}
+
+static bool LpmOff()
+{
+	DWORD ac, dc;
+	if (!ReadLpm(&ac, &dc)) {
+		printf("USB 3 link power management: can't read the power plan\n");
+		return false;
+	}
+	if (ac == 0 && dc == 0) return true;
+	std::wstring save = LpmSaveFile();
+	FILE* f = nullptr;
+	if (!save.empty() && GetFileAttributesW(save.c_str()) == INVALID_FILE_ATTRIBUTES && _wfopen_s(&f, save.c_str(), L"w") == 0 && f) {
+		fprintf(f, "%lu %lu\n", ac, dc);
+		fclose(f);
+	}
+	if (!WriteLpm(0, 0)) {
+		printf("USB 3 link power management: can't change the power plan (%lu)\n", GetLastError());
+		return false;
+	}
+	printf("USB 3 link power management: off (was %lu on AC, %lu on battery)\n", ac, dc);
+	return true;
+}
+
+static void LpmRestore()
+{
+	std::wstring save = LpmSaveFile();
+	FILE* f = nullptr;
+	if (save.empty() || _wfopen_s(&f, save.c_str(), L"r") || !f) return;
+	unsigned long ac = 2, dc = 2;
+	int n = fscanf_s(f, "%lu %lu", &ac, &dc);
+	fclose(f);
+	if (n == 2 && WriteLpm(ac, dc)) {
+		DeleteFileW(save.c_str());
+		printf("USB 3 link power management: back to %lu on AC, %lu on battery\n", ac, dc);
+	}
+}
 
 static std::wstring Prop(HDEVINFO set, SP_DEVINFO_DATA* dev, DWORD prop)
 {
@@ -219,7 +303,13 @@ int wmain(int argc, wchar_t** argv)
 		}
 	}
 	SetupDiDestroyDeviceInfoList(set);
-	if (wcscmp(mode, L"restore") == 0) {
+	if (wcscmp(mode, L"status") == 0) {
+		DWORD ac, dc;
+		if (ReadLpm(&ac, &dc)) printf("usb3-lpm %s\n", ac == 0 && dc == 0 ? "off" : "on");
+	} else if (wcscmp(mode, L"winusb") == 0) {
+		if (!LpmOff()) failed++;
+	} else if (wcscmp(mode, L"restore") == 0) {
+		LpmRestore();
 		DEVINST root;
 		if (CM_Locate_DevNodeW(&root, nullptr, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) CM_Reenumerate_DevNode(root, CM_REENUMERATE_SYNCHRONOUS);
 	}
