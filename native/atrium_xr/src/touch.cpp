@@ -10,11 +10,11 @@
 //   - places the Touches in the backend's space with a calibration: Touch tracking space ->
 //     the backend's STAGE (or LOCAL) space, saved in %APPDATA%\Atrium\touch_calibration.json.
 //
-// Calibrating needs no other controllers: hold the right Touch against the side of the headset,
-// click both Touch thumbsticks for 2 s (or create %APPDATA%\Atrium\touch_calibrate), and look
-// around (turn, nod, tilt) for ~8 s until the Touch buzzes again. The headset's own tracking and
-// the Touch's move together, which is all the solve needs. Until a calibration exists the game
-// keeps the backend's own input (its controllers, or hand tracking).
+// Calibrating needs no other controllers (as EchoQuestXR): with a Touch in each hand, press X, Y,
+// A and B together (or create %APPDATA%\Atrium\touch_calibrate), then move both hands around,
+// turning the wrists, for 5 s. The headset's hand tracking sees the hands holding the Touches.
+// A short buzz: calibrated; a long one: try again (the log says why). Until a calibration exists
+// the game keeps the backend's own input (its controllers, or hand tracking).
 #include "touch.h"
 
 #include <shlobj.h>
@@ -334,18 +334,23 @@ void SourceSync()
 	}
 }
 
-// A Touch pose (grip or aim) in the Touch tracking space at a QPC time. g_srcLock held.
-bool SourceLocate(int hand, bool aim, LONGLONG qpc, XrPosef* pose, XrSpaceLocationFlags* flags)
+// A Touch pose (grip or aim) in the Touch tracking space at a QPC time, and its velocities when
+// asked for (zero when the service has none). g_srcLock held.
+bool SourceLocate(int hand, bool aim, LONGLONG qpc, XrPosef* pose, XrSpaceLocationFlags* flags, XrVector3f* angVel = nullptr,
+	XrVector3f* linVel = nullptr)
 {
 	if (!g_src.ready || !g_src.fromQpc) return false;
 	LARGE_INTEGER li;
 	li.QuadPart = qpc;
 	XrTime t = 0;
 	if (XR_FAILED(g_src.fromQpc(g_src.inst, &li, &t))) return false;
-	XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+	XrSpaceVelocity vel = { XR_TYPE_SPACE_VELOCITY };
+	XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION, angVel ? &vel : nullptr };
 	if (XR_FAILED(g_src.locate(aim ? g_src.aim[hand] : g_src.grip[hand], g_src.stage, t, &loc))) return false;
 	*pose = loc.pose;
 	*flags = loc.locationFlags;
+	if (angVel) *angVel = (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) ? vel.angularVelocity : XrVector3f{};
+	if (linVel) *linVel = (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) ? vel.linearVelocity : XrVector3f{};
 	return (loc.locationFlags & kPoseValid) == kPoseValid;
 }
 
@@ -442,6 +447,10 @@ struct Backend {
 	PFN_xrDestroySession destroySession;
 	PFN_xrConvertTimeToWin32PerformanceCounterKHR toQpc;
 	PFN_xrConvertWin32PerformanceCounterToTimeKHR fromQpc;
+	// Hand tracking (XR_EXT_hand_tracking, enabled for the Touch swap when the backend has it).
+	PFN_xrCreateHandTrackerEXT createHandTracker;
+	PFN_xrDestroyHandTrackerEXT destroyHandTracker;
+	PFN_xrLocateHandJointsEXT locateHandJoints;
 };
 Backend g_b;
 XrInstance g_inst = XR_NULL_HANDLE;
@@ -463,8 +472,6 @@ bool g_profileEvent = false;
 // Calibration: Touch tracking space -> g_ref.
 bool g_calibrated = false;
 XrPosef g_calib = kIdentity;
-// The headset (the game session's VIEW space), which calibration matches the Touch against.
-XrSpace g_viewSpace = XR_NULL_HANDLE;
 
 std::wstring AtriumFile(const wchar_t* name)
 {
@@ -535,12 +542,22 @@ void SaveCalibration(double errorMm, size_t samples)
 	fclose(f);
 }
 
-// quest: the headset as the backend tracks it (VIEW in g_ref); touch: the right Touch held to it.
-struct Sample { XrPosef quest, touch; };
+// The calibration follows EchoQuestXR's (its Quest runtime, Rift Touch over Wi-Fi): with a Touch
+// in each hand, the headset's hand tracking sees the hands holding them, and each Touch turns and
+// moves with its hand. So out of the two tracks come the turn between the Touch space and the
+// headset's, the offset, the delay between the two trackers and where each Touch sits in its hand.
+// EchoQuestXR's spaces are both level (it finds a yaw); Atrium's sensor needn't be, so the whole
+// turn is solved here.
+
+// One moment of a hand's track: its palm (g_ref) and the Touch it holds (Touch space) with the
+// Touch's velocities, so other delays can be tried.
+struct Sample { XrPosef palm, touch; XrVector3f angVel, linVel; };
 enum class Cal { Idle, Collecting } g_cal = Cal::Idle;
-std::vector<Sample> g_samples;
+std::vector<Sample> g_track[2];
 ULONGLONG g_calStart = 0, g_comboSince = 0, g_lastSample = 0;
-const ULONGLONG kCalMs = 8000;
+bool g_comboUsed = false;
+const ULONGLONG kCalMs = 5000;
+XrHandTrackerEXT g_handTracker[2] = {};
 
 // Largest-eigenvalue eigenvector of a symmetric 4x4 (Jacobi).
 void Eigen4(double a[4][4], double out[4])
@@ -580,7 +597,7 @@ void Eigen4(double a[4][4], double out[4])
 	for (int k = 0; k < 4; k++) out[k] = v[k][best];
 }
 
-// Rotation vector (axis * angle) of q.
+// Rotation vector (axis * angle) of q, and back.
 XrVector3f RotVec(XrQuaternionf q)
 {
 	if (q.w < 0) q = { -q.x, -q.y, -q.z, -q.w };
@@ -590,33 +607,51 @@ XrVector3f RotVec(XrQuaternionf q)
 	return { (float)(q.x * k), (float)(q.y * k), (float)(q.z * k) };
 }
 
-// quest_i = Z * touch_i * X, solved for Z (Touch space -> g_ref): rotation from matching the
-// world-frame rotation axes of both devices (Horn), then Z's position and X's offset by least
-// squares. Returns the mean position error in meters, or < 0 when the motion was too small.
-double SolveCalibration(const std::vector<Sample>& s, XrPosef* z)
+XrQuaternionf FromRotVec(XrVector3f v)
+{
+	double a = sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+	if (a < 1e-9) return { 0, 0, 0, 1 };
+	double s = sin(a / 2) / a;
+	return { (float)(v.x * s), (float)(v.y * s), (float)(v.z * s), (float)cos(a / 2) };
+}
+
+double Angle(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+	double d = fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+	return 2 * acos(fmin(1.0, d));
+}
+
+// The Touch `lag` seconds after it was sampled (its velocities are in the Touch space).
+XrPosef Predict(const Sample& s, double lag)
+{
+	XrVector3f w = { (float)(s.angVel.x * lag), (float)(s.angVel.y * lag), (float)(s.angVel.z * lag) };
+	XrPosef p = s.touch;
+	p.orientation = QMul(FromRotVec(w), p.orientation);
+	p.position = { (float)(p.position.x + s.linVel.x * lag), (float)(p.position.y + s.linVel.y * lag),
+		(float)(p.position.z + s.linVel.z * lag) };
+	return p;
+}
+
+// The turn R (Touch space -> g_ref) from both hands' turns (Horn): palm_j palm_i^-1 = R (touch_j
+// touch_i^-1) R^-1, whatever the Touch's fixed turn in the hand. Pairs a few strides apart, so slow
+// movements count too. False with too little turning.
+bool SolveTurn(const std::vector<XrQuaternionf> touch[2], const std::vector<XrQuaternionf> palm[2], XrQuaternionf* R)
 {
 	double S[3][3] = {};
-	int pairs = 0, turned = 0;
-	double mismatch = 0;
-	for (size_t i = 0; i + 8 < s.size(); i++) {
-		size_t j = i + 8;
-		XrVector3f a = RotVec(QMul(s[j].quest.orientation, QConj(s[i].quest.orientation)));
-		XrVector3f b = RotVec(QMul(s[j].touch.orientation, QConj(s[i].touch.orientation)));
-		double la = sqrt(a.x * a.x + a.y * a.y + a.z * a.z), lb = sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
-		if (la < 0.25) continue;   // too little turn to say anything
-		turned++;
-		mismatch += fabs(la - lb);
-		// The two turned by different amounts: not held together, or one is tracking badly (a hand
-		// holding a Touch tracks worse than a controller, so allow a quarter of the turn).
-		if (fabs(la - lb) > fmax(0.15, 0.25 * la)) continue;
-		double av[3] = { a.x, a.y, a.z }, bv[3] = { b.x, b.y, b.z };
-		for (int r = 0; r < 3; r++)
-			for (int c = 0; c < 3; c++) S[r][c] += bv[r] * av[c];
-		pairs++;
-	}
-	g_log("touch: calibration: %zu samples, %d turning pairs, %d agree, mean turn mismatch %.0f deg", s.size(), turned, pairs,
-		turned ? mismatch / turned * 57.3 : 0.0);
-	if (pairs < 15) return -1;
+	int pairs = 0;
+	for (int h = 0; h < 2; h++)
+		for (size_t stride : { 4, 8, 16, 32, 64 })
+			for (size_t i = 0; i + stride < palm[h].size(); i++) {
+				size_t j = i + stride;
+				XrVector3f a = RotVec(QMul(palm[h][j], QConj(palm[h][i])));
+				XrVector3f b = RotVec(QMul(touch[h][j], QConj(touch[h][i])));
+				if (a.x * a.x + a.y * a.y + a.z * a.z < 0.25 * 0.25) continue;
+				double av[3] = { a.x, a.y, a.z }, bv[3] = { b.x, b.y, b.z };
+				for (int r = 0; r < 3; r++)
+					for (int c = 0; c < 3; c++) S[r][c] += bv[r] * av[c];
+				pairs++;
+			}
+	if (pairs < 20) return false;
 	double N[4][4] = {
 		{ S[0][0] + S[1][1] + S[2][2], S[1][2] - S[2][1], S[2][0] - S[0][2], S[0][1] - S[1][0] },
 		{ S[1][2] - S[2][1], S[0][0] - S[1][1] - S[2][2], S[0][1] + S[1][0], S[2][0] + S[0][2] },
@@ -625,126 +660,266 @@ double SolveCalibration(const std::vector<Sample>& s, XrPosef* z)
 	};
 	double e[4];
 	Eigen4(N, e);
-	XrQuaternionf rz = { (float)e[1], (float)e[2], (float)e[3], (float)e[0] };
 	double n = sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2] + e[3] * e[3]);
-	rz = { (float)(rz.x / n), (float)(rz.y / n), (float)(rz.z / n), (float)(rz.w / n) };
+	*R = { (float)(e[1] / n), (float)(e[2] / n), (float)(e[3] / n), (float)(e[0] / n) };
+	return true;
+}
 
-	// quest_p = Rz * (touch_p + touch_R * d) + t   ->   [I | Rz*touch_R] [t; d] = quest_p - Rz*touch_p
-	double A[6][7] = {};
-	auto colOf = [](const XrQuaternionf& q, int col) {
-		XrVector3f u = { col == 0 ? 1.f : 0.f, col == 1 ? 1.f : 0.f, col == 2 ? 1.f : 0.f };
-		return QRot(q, u);
-	};
-	for (const Sample& x : s) {
-		XrQuaternionf c = QMul(rz, x.touch.orientation);
-		XrVector3f rp = QRot(rz, x.touch.position);
-		double r[3] = { x.quest.position.x - rp.x, x.quest.position.y - rp.y, x.quest.position.z - rp.z };
-		double J[3][6] = {};
-		for (int k = 0; k < 3; k++) J[k][k] = 1;
-		for (int col = 0; col < 3; col++) {
-			XrVector3f cc = colOf(c, col);
-			J[0][3 + col] = cc.x;
-			J[1][3 + col] = cc.y;
-			J[2][3 + col] = cc.z;
-		}
-		for (int p = 0; p < 6; p++) {
-			for (int q = 0; q < 6; q++)
-				for (int k = 0; k < 3; k++) A[p][q] += J[k][p] * J[k][q];
-			for (int k = 0; k < 3; k++) A[p][6] += J[k][p] * r[k];
+// How much each Touch's turn in its hand wobbles with R (0 = rigid; EchoQuestXR's measure: 0.012
+// is about 18 degrees).
+double Spread(const std::vector<XrQuaternionf> touch[2], const std::vector<XrQuaternionf> palm[2], const XrQuaternionf& R)
+{
+	double spread = 0;
+	size_t n = 0;
+	for (int h = 0; h < 2; h++) {
+		XrQuaternionf first = {};
+		for (size_t i = 0; i < palm[h].size(); i++) {
+			XrQuaternionf x = QMul(QConj(QMul(R, touch[h][i])), palm[h][i]);
+			if (!i) first = x;
+			spread += 1 - fmin(1.0, fabs(x.x * first.x + x.y * first.y + x.z * first.z + x.w * first.w));
+			n++;
 		}
 	}
-	for (int p = 0; p < 6; p++) {   // Gauss-Jordan with partial pivoting
+	return n ? spread / n : 1;
+}
+
+// Gauss-Jordan with partial pivoting on an n x (n+1) system, n <= 9. False if singular.
+bool SolveLinear(int n, double A[9][10], double* x)
+{
+	for (int p = 0; p < n; p++) {
 		int piv = p;
-		for (int q = p + 1; q < 6; q++)
+		for (int q = p + 1; q < n; q++)
 			if (fabs(A[q][p]) > fabs(A[piv][p])) piv = q;
-		if (fabs(A[piv][p]) < 1e-9) return -1;
-		for (int k = 0; k < 7; k++) {
-			double t = A[p][k];
-			A[p][k] = A[piv][k];
-			A[piv][k] = t;
-		}
-		for (int q = 0; q < 6; q++) {
+		if (fabs(A[piv][p]) < 1e-9) return false;
+		for (int k = 0; k <= n; k++) std::swap(A[p][k], A[piv][k]);
+		for (int q = 0; q < n; q++) {
 			if (q == p) continue;
 			double f = A[q][p] / A[p][p];
-			for (int k = 0; k < 7; k++) A[q][k] -= f * A[p][k];
+			for (int k = 0; k <= n; k++) A[q][k] -= f * A[p][k];
 		}
 	}
-	double sol[6];
-	for (int p = 0; p < 6; p++) sol[p] = A[p][6] / A[p][p];
-	XrVector3f t = { (float)sol[0], (float)sol[1], (float)sol[2] }, d = { (float)sol[3], (float)sol[4], (float)sol[5] };
+	for (int p = 0; p < n; p++) x[p] = A[p][n] / A[p][p];
+	return true;
+}
 
-	double err = 0;
-	for (const Sample& x : s) {
-		XrVector3f off = QRot(QMul(rz, x.touch.orientation), d);
-		XrVector3f rp = QRot(rz, x.touch.position);
-		double dx = rp.x + off.x + t.x - x.quest.position.x, dy = rp.y + off.y + t.y - x.quest.position.y,
-			   dz = rp.z + off.z + t.z - x.quest.position.z;
-		err += sqrt(dx * dx + dy * dy + dz * dz);
+struct CalResult {
+	bool ok = false;
+	XrPosef z = kIdentity;
+	double spread = 0, lag = 0, rms = 0, turned = 0, reach = 0;
+	char why[128] = "";
+};
+
+CalResult SolveCalibration(const std::vector<Sample> track[2])
+{
+	CalResult r;
+	bool use[2];
+	for (int h = 0; h < 2; h++) use[h] = track[h].size() >= 60;
+	if (!use[0] && !use[1]) {
+		snprintf(r.why, sizeof r.why, "the hands weren't seen holding tracked Touches (left %zu, right %zu samples)", track[0].size(),
+			track[1].size());
+		return r;
 	}
-	*z = { rz, t };
-	return err / s.size();
+	std::vector<XrQuaternionf> palm[2], touch[2];
+	for (int h = 0; h < 2; h++) {
+		if (!use[h]) continue;
+		for (const Sample& s : track[h]) {
+			palm[h].push_back(s.palm.orientation);
+			r.turned = fmax(r.turned, Angle(track[h][0].palm.orientation, s.palm.orientation) * 57.3);
+		}
+		touch[h].resize(track[h].size());
+	}
+	if (r.turned < 30) {
+		snprintf(r.why, sizeof r.why, "turn your wrists more (they turned %.0f degrees)", r.turned);
+		return r;
+	}
+
+	// The delay of the Touch data against the hands' that fits best.
+	double best = 1e30;
+	XrQuaternionf R = { 0, 0, 0, 1 };
+	for (int ms = -150; ms <= 100; ms += 10) {
+		for (int h = 0; h < 2; h++)
+			for (size_t i = 0; use[h] && i < track[h].size(); i++) touch[h][i] = Predict(track[h][i], ms / 1000.0).orientation;
+		XrQuaternionf Rm;
+		if (!SolveTurn(touch, palm, &Rm)) continue;
+		double sp = Spread(touch, palm, Rm);
+		if (sp < best) {
+			best = sp;
+			R = Rm;
+			r.lag = ms / 1000.0;
+		}
+	}
+	if (best > 1e29) {
+		snprintf(r.why, sizeof r.why, "turn your wrists more, every way");
+		return r;
+	}
+	r.spread = best;
+
+	// R * touchAt + t = palmAt + palm * d[h]: t, then d of each hand used (in its palm), by least squares.
+	int col[2] = { -1, -1 }, n = 3;
+	for (int h = 0; h < 2; h++)
+		if (use[h]) {
+			col[h] = n;
+			n += 3;
+		}
+	double A[9][10] = {};
+	std::vector<XrVector3f> at[2];
+	for (int h = 0; h < 2; h++) {
+		if (!use[h]) continue;
+		for (const Sample& s : track[h]) {
+			XrVector3f p = QRot(R, Predict(s, r.lag).position);
+			at[h].push_back(p);
+			double rhs[3] = { s.palm.position.x - p.x, s.palm.position.y - p.y, s.palm.position.z - p.z };
+			XrVector3f c[3] = { QRot(s.palm.orientation, { 1, 0, 0 }), QRot(s.palm.orientation, { 0, 1, 0 }), QRot(s.palm.orientation, { 0, 0, 1 }) };
+			for (int k = 0; k < 3; k++) {
+				double row[9] = {};
+				row[k] = 1;
+				for (int j = 0; j < 3; j++) row[col[h] + j] = -(k == 0 ? c[j].x : k == 1 ? c[j].y : c[j].z);
+				for (int i2 = 0; i2 < n; i2++) {
+					A[i2][n] += row[i2] * rhs[k];
+					for (int j = 0; j < n; j++) A[i2][j] += row[i2] * row[j];
+				}
+			}
+		}
+	}
+	double x[9];
+	if (!SolveLinear(n, A, x)) {
+		snprintf(r.why, sizeof r.why, "turn your wrists more, every way");
+		return r;
+	}
+	XrVector3f t = { (float)x[0], (float)x[1], (float)x[2] };
+	double err = 0;
+	size_t count = 0;
+	for (int h = 0; h < 2; h++) {
+		if (!use[h]) continue;
+		XrVector3f d = { (float)x[col[h]], (float)x[col[h] + 1], (float)x[col[h] + 2] };
+		r.reach = fmax(r.reach, sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+		for (size_t i = 0; i < track[h].size(); i++) {
+			const Sample& s = track[h][i];
+			XrVector3f hd = QRot(s.palm.orientation, d);
+			double ex = at[h][i].x + t.x - s.palm.position.x - hd.x, ey = at[h][i].y + t.y - s.palm.position.y - hd.y,
+				   ez = at[h][i].z + t.z - s.palm.position.z - hd.z;
+			err += ex * ex + ey * ey + ez * ez;
+			count++;
+		}
+	}
+	r.rms = sqrt(err / count);
+	r.z = { R, t };
+	if (r.spread > 0.012) snprintf(r.why, sizeof r.why, "the hand tracking didn't follow the Touches (wobble %.3f)", r.spread);
+	else if (r.reach > 0.25) snprintf(r.why, sizeof r.why, "a Touch came out %.0f cm from its hand", r.reach * 100);
+	else if (r.rms > 0.05) snprintf(r.why, sizeof r.why, "error %.1f cm: move the hands more slowly", r.rms * 100);
+	else r.ok = true;
+	return r;
+}
+
+void HandTrackers(bool on)
+{
+	for (int h = 0; h < 2; h++) {
+		if (on && g_handTracker[h] == XR_NULL_HANDLE && g_b.createHandTracker) {
+			XrHandTrackerCreateInfoEXT ci = { XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT, nullptr, h ? XR_HAND_RIGHT_EXT : XR_HAND_LEFT_EXT,
+				XR_HAND_JOINT_SET_DEFAULT_EXT };
+			if (XR_FAILED(g_b.createHandTracker(g_session, &ci, &g_handTracker[h]))) g_handTracker[h] = XR_NULL_HANDLE;
+		} else if (!on && g_handTracker[h] != XR_NULL_HANDLE) {
+			g_b.destroyHandTracker(g_handTracker[h]);
+			g_handTracker[h] = XR_NULL_HANDLE;
+		}
+	}
+}
+
+// A hand's palm in g_ref, if the headset tracks it now.
+bool Palm(int h, XrTime time, XrPosef* pose)
+{
+	if (g_handTracker[h] == XR_NULL_HANDLE) return false;
+	XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT];
+	XrHandJointLocationsEXT locs = { XR_TYPE_HAND_JOINT_LOCATIONS_EXT, nullptr, XR_FALSE, XR_HAND_JOINT_COUNT_EXT, joints };
+	XrHandJointsLocateInfoEXT li = { XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT, nullptr, g_ref, time };
+	if (XR_FAILED(g_b.locateHandJoints(g_handTracker[h], &li, &locs)) || !locs.isActive) return false;
+	const XrHandJointLocationEXT& p = joints[XR_HAND_JOINT_PALM_EXT];
+	const XrSpaceLocationFlags need = kPoseValid | XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+	if ((p.locationFlags & need) != need) return false;
+	*pose = p.pose;
+	return true;
 }
 
 // Runs from the game's xrSyncActions. g_lock held.
 void CalibrationTick(XrTime syncTime)
 {
-	if (g_viewSpace == XR_NULL_HANDLE || g_session == XR_NULL_HANDLE || g_ref == XR_NULL_HANDLE) return;
+	if (g_session == XR_NULL_HANDLE || g_ref == XR_NULL_HANDLE) return;
 	ULONGLONG now = GetTickCount64();
 
 	if (g_cal == Cal::Idle) {
+		// Asked for: X, Y, A and B held together for a third of a second (once per press), or the app.
 		bool combo;
 		{
 			std::lock_guard<std::mutex> lk(g_srcLock);
-			combo = g_src.ready && g_src.state[0].value[A_STICK_CLICK] > 0.5f && g_src.state[1].value[A_STICK_CLICK] > 0.5f;
+			const HandState* s = g_src.state;
+			combo = g_src.ready && s[0].value[A_LOWER] > 0.5f && s[0].value[A_UPPER] > 0.5f && s[1].value[A_LOWER] > 0.5f &&
+				s[1].value[A_UPPER] > 0.5f;
 		}
-		g_comboSince = combo ? (g_comboSince ? g_comboSince : now) : 0;
+		bool ask = false;
+		if (combo) {
+			if (!g_comboSince) g_comboSince = now;
+			else if (now - g_comboSince > 330 && !g_comboUsed) ask = g_comboUsed = true;
+		} else {
+			g_comboSince = 0;
+			g_comboUsed = false;
+		}
 		std::wstring request = AtriumFile(L"touch_calibrate");
-		bool requested = GetFileAttributesW(request.c_str()) != INVALID_FILE_ATTRIBUTES;
-		if (requested) DeleteFileW(request.c_str());
-		if (!requested && !(g_comboSince && now - g_comboSince > 2000)) return;
-		g_comboSince = 0;
+		if (GetFileAttributesW(request.c_str()) != INVALID_FILE_ATTRIBUTES) {
+			DeleteFileW(request.c_str());
+			ask = true;
+		}
+		if (!ask) return;
+		if (!g_b.createHandTracker) {
+			g_log("touch: can't calibrate: the headset's runtime has no hand tracking (XR_EXT_hand_tracking)");
+			Buzz(0, 0.8f);
+			Buzz(1, 0.8f);
+			return;
+		}
+		HandTrackers(true);
+		g_track[0].clear();
+		g_track[1].clear();
 		g_cal = Cal::Collecting;
-		g_samples.clear();
 		g_calStart = now;
-		g_log("touch: calibrating, hold the right Touch against the side of the headset and look around");
-		Buzz(1, 0.3f);
+		g_log("touch: calibrating: move both hands around, turning the wrists, for 5 seconds");
+		Buzz(0, 0.15f);
+		Buzz(1, 0.15f);
 		return;
 	}
 
-	if (now - g_lastSample >= 30) {
+	if (now - g_lastSample >= 20) {
 		g_lastSample = now;
 		LONGLONG qpc;
-		XrSpaceLocation q = { XR_TYPE_SPACE_LOCATION };
-		Sample smp;
-		XrSpaceLocationFlags tf = 0;
-		bool ok = QpcOf(syncTime, &qpc) && XR_SUCCEEDED(g_b.locate(g_viewSpace, g_ref, syncTime, &q)) &&
-			(q.locationFlags & kPoseValid) == kPoseValid;
-		if (ok) {
-			std::lock_guard<std::mutex> lk(g_srcLock);
-			ok = SourceLocate(1, false, qpc, &smp.touch, &tf) && (tf & XR_SPACE_LOCATION_POSITION_TRACKED_BIT);
-		}
-		if (ok) {
-			smp.quest = q.pose;
-			g_samples.push_back(smp);
+		if (QpcOf(syncTime, &qpc)) {
+			for (int h = 0; h < 2; h++) {
+				Sample s;
+				XrSpaceLocationFlags tf = 0;
+				if (!Palm(h, syncTime, &s.palm)) continue;
+				std::lock_guard<std::mutex> lk(g_srcLock);
+				if (SourceLocate(h, false, qpc, &s.touch, &tf, &s.angVel, &s.linVel) && (tf & XR_SPACE_LOCATION_POSITION_TRACKED_BIT))
+					g_track[h].push_back(s);
+			}
 		}
 	}
 	if (now - g_calStart < kCalMs) return;
 
 	g_cal = Cal::Idle;
-	XrPosef z;
-	double err = SolveCalibration(g_samples, &z);
-	if (err < 0 || err > 0.03) {
-		g_log("touch: calibration failed (%zu samples, error %.1f mm): move and turn more, keep both tracked", g_samples.size(),
-			err * 1000);
-		Buzz(1, 0.1f);
+	HandTrackers(false);
+	CalResult r = SolveCalibration(g_track);
+	g_log("touch: calibration: %zu + %zu samples, wrists turned %.0f deg, wobble %.4f, delay %+.0f ms, error %.1f cm, Touch %.0f cm from palm",
+		g_track[0].size(), g_track[1].size(), r.turned, r.spread, r.lag * 1000, r.rms * 100, r.reach * 100);
+	if (!r.ok) {
+		g_log("touch: couldn't calibrate: %s", r.why);
+		Buzz(0, 0.8f);
+		Buzz(1, 0.8f);
 		return;
 	}
-	g_calib = z;
+	g_calib = r.z;
 	bool first = !g_calibrated;
 	g_calibrated = true;
-	SaveCalibration(err * 1000, g_samples.size());
-	g_log("touch: calibrated from %zu samples, mean error %.1f mm", g_samples.size(), err * 1000);
-	Buzz(1, 0.6f);
+	SaveCalibration(r.rms * 1000, g_track[0].size() + g_track[1].size());
+	g_log("touch: calibrated");
+	Buzz(0, 0.12f);
+	Buzz(1, 0.12f);
 	if (first) g_profileEvent = true;   // the game switches over to the Touches
 }
 
@@ -937,8 +1112,6 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrAttachSessionActionSets(XrSession session, co
 		g_calibrated = false;
 	}
 	g_refStage = stage;
-	rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-	g_b.createReferenceSpace(session, &rci, &g_viewSpace);
 	g_profileEvent = g_calibrated;
 	g_log("touch: game bindings attached, Touches answer as %s%s", g_profile.empty() ? "(no bindings)" : g_profile.c_str(),
 		g_calibrated ? "" : " once calibrated");
@@ -1154,9 +1327,9 @@ XRAPI_ATTR XrResult XRAPI_CALL W_xrDestroySession(XrSession session)
 	{
 		std::lock_guard<std::mutex> lk(g_lock);
 		if (session == g_session) {
+			HandTrackers(false);
 			g_session = XR_NULL_HANDLE;
 			g_ref = XR_NULL_HANDLE;
-			g_viewSpace = XR_NULL_HANDLE;
 			g_actionSpaces.clear();
 			g_values.clear();
 			g_cal = Cal::Idle;
@@ -1232,6 +1405,11 @@ void OnInstanceCreated(XrInstance instance, PFN_xrGetInstanceProcAddr gipa, XrTi
 	g_b.destroySession = (PFN_xrDestroySession)get("xrDestroySession");
 	g_b.toQpc = (PFN_xrConvertTimeToWin32PerformanceCounterKHR)get("xrConvertTimeToWin32PerformanceCounterKHR");
 	g_b.fromQpc = (PFN_xrConvertWin32PerformanceCounterToTimeKHR)get("xrConvertWin32PerformanceCounterToTimeKHR");
+	g_b.createHandTracker = (PFN_xrCreateHandTrackerEXT)get("xrCreateHandTrackerEXT");
+	g_b.destroyHandTracker = (PFN_xrDestroyHandTrackerEXT)get("xrDestroyHandTrackerEXT");
+	g_b.locateHandJoints = (PFN_xrLocateHandJointsEXT)get("xrLocateHandJointsEXT");
+	if (!g_b.createHandTracker || !g_b.destroyHandTracker || !g_b.locateHandJoints) g_b.createHandTracker = nullptr;
+	g_log("touch: hand tracking for calibration %s", g_b.createHandTracker ? "available" : "not available");
 	if (!g_b.toQpc || !g_b.fromQpc) {
 		g_log("touch: the backend has no time conversion (XR_KHR_win32_convert_performance_counter_time), swap off");
 		g_manifest.clear();

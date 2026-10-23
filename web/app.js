@@ -331,9 +331,9 @@ function mix() {
         st.sensors.length ? (sensorsOk ? btn('mixRestoreSensors', 'Give back to Meta', false, 'sensors') : btn('mixSetupSensors', 'Set up sensors', true, 'sensors')) : '')}
       ${step(st.service_running, 'Atrium\'s tracking service', st.service_running ? 'Running: tracking the Touches with your sensors.' : m.enabled ? (st.rift ? 'Starting…' : 'Starts when the Rift is plugged in.') : 'Starts when you pick Rift CV1 Touches above.',
         st.service_running ? btn('mixRestartService', 'Restart', false, 'service') : '')}
-      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one, hold the right Touch against the side of the headset, and look around (turn, nod, tilt) until the Touch buzzes again.'
-        : cal ? `Lined up with your headset's ${esc(cal.reference)} space, ${cal.error_mm.toFixed(1)} mm off on average (${ago(cal.when).toLowerCase()}).`
-        : 'Lines the Touches up with your headset, once; no other controllers needed. In a game: hold the right Touch against the side of the headset, click both Touch thumbsticks for 2 s (or press Calibrate here), then look around until it buzzes again.',
+      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one with a Touch in each hand; when they buzz, move both hands around, turning your wrists, for 5 seconds.'
+        : cal ? `Lined up with your headset's ${esc(cal.reference)} space, ${(cal.error_mm / 10).toFixed(1)} cm off on average (${ago(cal.when).toLowerCase()}).`
+        : 'Lines the Touches up with your headset, once; no other controllers needed (the headset\'s hand tracking sees your hands). In a game, with a Touch in each hand: press X, Y, A and B together (or Calibrate here), then move both hands around, turning your wrists, for 5 seconds. A short buzz means done.',
         m.enabled ? btn('mixCalibrate', cal ? 'Calibrate again' : 'Calibrate', !cal) : '')}
     </div>
     <h2>What the sensors see</h2>

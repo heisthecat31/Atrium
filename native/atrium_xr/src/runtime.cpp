@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -277,10 +278,15 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateInstance(const XrInstanceCr
 	XrInstanceCreateInfo ci = *info;
 	if (!has && BackendHasExtension(convert)) {
 		exts.push_back(convert);
-		ci.enabledExtensionCount = (uint32_t)exts.size();
-		ci.enabledExtensionNames = exts.data();
 		has = true;
 	}
+	// The Touch swap's calibration watches the hands holding the Touches (hand tracking).
+	const char* hands = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
+	if (touch::Configured() && std::none_of(exts.begin(), exts.end(), [&](const char* e) { return strcmp(e, hands) == 0; }) &&
+		BackendHasExtension(hands))
+		exts.push_back(hands);
+	ci.enabledExtensionCount = (uint32_t)exts.size();
+	ci.enabledExtensionNames = exts.data();
 	XrResult r = next(&ci, instance);
 	if (XR_SUCCEEDED(r) && touch::Configured()) touch::OnInstanceCreated(*instance, g_backendGipa, OvrTime);
 	if (XR_SUCCEEDED(r) && ovr) {
