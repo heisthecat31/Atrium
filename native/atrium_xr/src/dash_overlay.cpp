@@ -69,11 +69,12 @@ struct DashState
 	XrActionSet set = XR_NULL_HANDLE;
 	XrAction aim = XR_NULL_HANDLE, grip = XR_NULL_HANDLE, trigger = XR_NULL_HANDLE, squeeze = XR_NULL_HANDLE;
 	XrAction stick = XR_NULL_HANDLE, buzz = XR_NULL_HANDLE;
-	XrAction button[7] = {}; // one per kButtons entry (the dash button can be any of them)
+	XrAction button[8] = {}; // one per kButtons entry (the dash button can be any of them)
 	XrPath hand[2] = {};
 	bool suggested = false; // ours went out with at least one of the game's profiles
 	bool attached = false;
-	std::set<uint64_t> gameButtonActions[7]; // the game's actions on each kButtons entry
+	std::set<uint64_t> gameButtonActions[8]; // the game's actions on each kButtons entry
+	bool systemButton = true; // the runtime took a binding on the Oculus button
 
 	// Controls tab (dash.json), re-read every second.
 	int openButton = 0;
@@ -95,8 +96,8 @@ struct DashState
 	uint32_t width = 0, height = 0;
 	std::vector<ID3D11Texture2D*> img11;
 	std::vector<ID3D12Resource*> img12;
-	ID3D11Texture2D* shared11 = nullptr;
-	ID3D12Resource* shared12 = nullptr;
+	ID3D11Texture2D* shared11[ATRIUM_DASH_SLOTS] = {};
+	ID3D12Resource* shared12[ATRIUM_DASH_SLOTS] = {};
 	ID3D12CommandAllocator* alloc[3] = {};
 	ID3D12GraphicsCommandList* list = nullptr;
 	ID3D12Fence* fence = nullptr;
@@ -162,7 +163,7 @@ static void EnsureActions(XrInstance inst)
 	make("trigger", XR_ACTION_TYPE_FLOAT_INPUT, d.trigger);
 	make("squeeze", XR_ACTION_TYPE_FLOAT_INPUT, d.squeeze);
 	make("stick", XR_ACTION_TYPE_VECTOR2F_INPUT, d.stick);
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < 8; i++) {
 		// No hand: each is one button.
 		XrActionCreateInfo ai = { XR_TYPE_ACTION_CREATE_INFO };
 		snprintf(ai.actionName, sizeof ai.actionName, "atrium_dash_button_%d", i);
@@ -176,11 +177,14 @@ static void EnsureActions(XrInstance inst)
 
 // The buttons the dash can use and games can have remapped (ids as the dash's Controls tab).
 struct ButtonPath { const char* id; const char* base; bool touch; };
-static const ButtonPath kButtons[7] = {
+static const ButtonPath kButtons[8] = {
 	{ "left_menu", "/user/hand/left/input/menu", false }, { "x", "/user/hand/left/input/x", true },
 	{ "y", "/user/hand/left/input/y", true }, { "a", "/user/hand/right/input/a", true }, { "b", "/user/hand/right/input/b", true },
 	{ "left_stick", "/user/hand/left/input/thumbstick", true }, { "right_stick", "/user/hand/right/input/thumbstick", true },
+	// The Oculus button: runtimes may keep it for themselves (Meta's does while its Dash is on).
+	{ "oculus", "/user/hand/right/input/system", false },
 };
+static const int kSystemButton = 7;
 
 static std::string DashJson()
 {
@@ -209,17 +213,15 @@ static std::string DashSetting(const std::string& json, const char* key)
 	return end == std::string::npos ? std::string() : json.substr(at + 1, end - at - 1);
 }
 
+// The Controls tab's choices, from the dash's shared memory (no file reads on the game's thread).
+static bool ShmReady();
 static void ReadControls()
 {
 	DashState& d = g_dash;
-	if (GetTickCount64() - d.controlsRead < 1000) return;
-	d.controlsRead = GetTickCount64();
-	std::string j = DashJson();
-	std::string b = DashSetting(j, "openButton");
-	d.openButton = 0;
-	for (int i = 0; i < 7; i++) if (b == kButtons[i].id) d.openButton = i;
-	d.openHold = DashSetting(j, "openMode") != "press";
-	d.pauseGame = DashSetting(j, "pauseGame") == "on";
+	if (!ShmReady()) return;
+	d.openButton = d.shm->openButton >= 0 && d.shm->openButton < 8 ? d.shm->openButton : 0;
+	d.openHold = d.shm->openHold != 0;
+	d.pauseGame = d.shm->pauseGame != 0;
 }
 
 // The game's binding path after the Controls tab's remapping ("x=a,a=x"): same if not remapped,
@@ -282,7 +284,10 @@ static void AddOurBindings(XrInstance inst, const ProfilePaths& p, std::vector<X
 	}
 	// The dash button candidates: all of them on Touch, the menu button elsewhere.
 	if (TouchFamily(p.profile)) {
-		for (int i = 0; i < 7; i++) out.push_back({ d.button[i], Path(inst, (std::string(kButtons[i].base) + "/click").c_str()) });
+		for (int i = 0; i < 8; i++) {
+			if (i == kSystemButton && !d.systemButton) continue;
+			out.push_back({ d.button[i], Path(inst, (std::string(kButtons[i].base) + "/click").c_str()) });
+		}
 	} else {
 		out.push_back({ d.button[0], Path(inst, p.menu) });
 	}
@@ -313,7 +318,7 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 	}
 	// Remember the game's actions on each dash-button candidate: filtered while it's the dash's.
 	for (const XrActionSuggestedBinding& sb : all)
-		for (int k = 0; k < 7; k++)
+		for (int k = 0; k < 8; k++)
 			if (sb.binding == Path(instance, (std::string(kButtons[k].base) + "/click").c_str()) ||
 				(k == 0 && sb.binding == Path(instance, p->menu)))
 				g_dash.gameButtonActions[k].insert((uint64_t)sb.action);
@@ -323,6 +328,16 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 	merged.countSuggestedBindings = (uint32_t)all.size();
 	merged.suggestedBindings = all.data();
 	XrResult r = next(instance, &merged);
+	if (XR_FAILED(r) && TouchFamily(p->profile) && g_dash.systemButton) {
+		// The runtime keeps the Oculus button: everything else without it.
+		AtriumLog("dash: %s: the runtime keeps the Oculus button (%d)", p->profile, (int)r);
+		g_dash.systemButton = false;
+		all.resize(gameCount);
+		AddOurBindings(instance, *p, all);
+		merged.countSuggestedBindings = (uint32_t)all.size();
+		merged.suggestedBindings = all.data();
+		r = next(instance, &merged);
+	}
 	if (XR_FAILED(r)) {
 		AtriumLog("dash: bindings for %s refused (%d); the game's alone", p->profile, (int)r);
 		merged.countSuggestedBindings = (uint32_t)gameCount;
@@ -487,10 +502,12 @@ static void ReleaseImages()
 	d.swap = XR_NULL_HANDLE;
 	d.img11.clear();
 	d.img12.clear();
-	if (d.shared11) d.shared11->Release();
-	if (d.shared12) d.shared12->Release();
-	d.shared11 = nullptr;
-	d.shared12 = nullptr;
+	for (int s = 0; s < ATRIUM_DASH_SLOTS; s++) {
+		if (d.shared11[s]) d.shared11[s]->Release();
+		if (d.shared12[s]) d.shared12[s]->Release();
+		d.shared11[s] = nullptr;
+		d.shared12[s] = nullptr;
+	}
 	for (auto& a : d.alloc) { if (a) a->Release(); a = nullptr; }
 	if (d.list) d.list->Release();
 	if (d.fence) d.fence->Release();
@@ -545,20 +562,28 @@ static bool EnsurePicture(XrSession session)
 		for (auto& i : imgs) d.img11.push_back(i.texture);
 		ID3D11Device1* d1 = nullptr;
 		if (SUCCEEDED(d.d11->QueryInterface(&d1))) {
-			d1->OpenSharedResourceByName(ATRIUM_DASH_TEXTURE, DXGI_SHARED_RESOURCE_READ, IID_PPV_ARGS(&d.shared11));
+			for (int s = 0; s < ATRIUM_DASH_SLOTS; s++) {
+				wchar_t name[64];
+				swprintf_s(name, L"%s%d", ATRIUM_DASH_TEXTURE, s);
+				d1->OpenSharedResourceByName(name, DXGI_SHARED_RESOURCE_READ, IID_PPV_ARGS(&d.shared11[s]));
+			}
 			d1->Release();
 		}
-		if (!d.shared11) { AtriumLog("dash: couldn't open the dash's picture (D3D11)"); ReleaseImages(); return false; }
+		if (!d.shared11[ATRIUM_DASH_SLOTS - 1]) { AtriumLog("dash: couldn't open the dash's pictures (D3D11)"); ReleaseImages(); return false; }
 	} else {
 		std::vector<XrSwapchainImageD3D12KHR> imgs(n, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
 		BK(d.instance, xrEnumerateSwapchainImages)(d.swap, n, &n, (XrSwapchainImageBaseHeader*)imgs.data());
 		for (auto& i : imgs) d.img12.push_back(i.texture);
-		HANDLE h = nullptr;
-		if (SUCCEEDED(d.d12->OpenSharedHandleByName(ATRIUM_DASH_TEXTURE, GENERIC_ALL, &h))) {
-			d.d12->OpenSharedHandle(h, IID_PPV_ARGS(&d.shared12));
-			CloseHandle(h);
+		for (int s = 0; s < ATRIUM_DASH_SLOTS; s++) {
+			wchar_t name[64];
+			swprintf_s(name, L"%s%d", ATRIUM_DASH_TEXTURE, s);
+			HANDLE h = nullptr;
+			if (SUCCEEDED(d.d12->OpenSharedHandleByName(name, GENERIC_ALL, &h))) {
+				d.d12->OpenSharedHandle(h, IID_PPV_ARGS(&d.shared12[s]));
+				CloseHandle(h);
+			}
 		}
-		if (!d.shared12) { AtriumLog("dash: couldn't open the dash's picture (D3D12)"); ReleaseImages(); return false; }
+		if (!d.shared12[ATRIUM_DASH_SLOTS - 1]) { AtriumLog("dash: couldn't open the dash's pictures (D3D12)"); ReleaseImages(); return false; }
 		for (auto& a : d.alloc) d.d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a));
 		d.d12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d.alloc[0], nullptr, IID_PPV_ARGS(&d.list));
 		d.list->Close();
@@ -569,13 +594,13 @@ static bool EnsurePicture(XrSession session)
 	return true;
 }
 
-static void CopyPicture(uint32_t index)
+static void CopyPicture(uint32_t index, int src)
 {
 	DashState& d = g_dash;
 	if (d.api == 11) {
 		ID3D11DeviceContext* ctx = nullptr;
 		d.d11->GetImmediateContext(&ctx);
-		ctx->CopyResource(d.img11[index], d.shared11);
+		ctx->CopyResource(d.img11[index], d.shared11[src]);
 		ctx->Release();
 		return;
 	}
@@ -593,11 +618,11 @@ static void CopyPicture(uint32_t index)
 	b[0].Transition.Subresource = b[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	b[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-	b[1].Transition.pResource = d.shared12;
+	b[1].Transition.pResource = d.shared12[src];
 	b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
 	b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
 	d.list->ResourceBarrier(2, b);
-	d.list->CopyResource(d.img12[index], d.shared12);
+	d.list->CopyResource(d.img12[index], d.shared12[src]);
 	std::swap(b[0].Transition.StateBefore, b[0].Transition.StateAfter);
 	std::swap(b[1].Transition.StateBefore, b[1].Transition.StateAfter);
 	d.list->ResourceBarrier(2, b);
@@ -715,14 +740,20 @@ bool DashEndFrame(XrSession session, const XrFrameEndInfo* info, std::vector<con
 	XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
 	wi.timeout = 100000000;
 	BK(inst, xrWaitSwapchainImage)(d.swap, &wi);
-	CopyPicture(index);
+	// The latest finished picture and the views it was drawn for (read together: the dash
+	// publishes a slot only after filling its views).
+	int slot = d.shm->latestSlot % ATRIUM_DASH_SLOTS;
+	MemoryBarrier();
+	AtriumDashPose eyes[2] = { d.shm->slotEye[slot][0], d.shm->slotEye[slot][1] };
+	AtriumDashFov fovs[2] = { d.shm->slotFov[slot][0], d.shm->slotFov[slot][1] };
+	CopyPicture(index, slot);
 	XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
 	BK(inst, xrReleaseSwapchainImage)(d.swap, &ri);
 
 	for (int e = 0; e < 2; e++) {
 		d.views[e] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
-		d.views[e].pose = Xr(d.shm->renderedEye[e]);
-		const AtriumDashFov& f = d.shm->renderedFov[e];
+		d.views[e].pose = Xr(eyes[e]);
+		const AtriumDashFov& f = fovs[e];
 		d.views[e].fov = { f.left, f.right, f.up, f.down };
 		d.views[e].subImage.swapchain = d.swap;
 		d.views[e].subImage.imageRect = { { (int32_t)(e * d.width / 2), 0 }, { (int32_t)(d.width / 2), (int32_t)d.height } };

@@ -139,9 +139,11 @@ struct Look
 struct ButtonDef { const char* id; const wchar_t* name; };
 static const ButtonDef kButtons[] = {
 	{ "left_menu", L"Menu" }, { "x", L"X" }, { "y", L"Y" }, { "a", L"A" }, { "b", L"B" },
-	{ "left_stick", L"L stick" }, { "right_stick", L"R stick" },
+	{ "left_stick", L"L stick" }, { "right_stick", L"R stick" }, { "oculus", L"Oculus" },
 };
+// The Oculus button opens the dash but isn't remapped for games (they never get it).
 static const int kButtonCount = sizeof kButtons / sizeof kButtons[0];
+static const int kRemapCount = kButtonCount - 1;
 static Look g_look;
 
 struct Accent { const char* name; float r, g, b; };
@@ -151,8 +153,11 @@ static const Accent kAccents[] = {
 };
 static const int kAccentCount = sizeof kAccents / sizeof kAccents[0];
 
+static void PublishControls();
+
 static void SaveLook()
 {
+	PublishControls();
 	FILE* f = nullptr;
 	if (_wfopen_s(&f, (g_dataDir + L"\\dash.json").c_str(), L"w") || !f) return;
 	// "remap" is one string ("x=a,a=x") so the runtime's small JSON reader can take it.
@@ -195,6 +200,19 @@ static void LoadLook()
 }
 
 // ---- graphics -------------------------------------------------------------------------------
+static AtriumDashShared* g_shm;
+static const char* const kButtonIds[] = { "left_menu", "x", "y", "a", "b", "left_stick", "right_stick", "oculus" };
+
+static void PublishControls()
+{
+	if (!g_shm) return;
+	int b = 0;
+	for (int i = 0; i < 8; i++) if (g_look.openButton == kButtonIds[i]) b = i;
+	g_shm->openButton = b;
+	g_shm->openHold = g_look.openHold ? 1 : 0;
+	g_shm->pauseGame = g_look.pauseGame ? 1 : 0;
+}
+
 static ComPtr<ID3D11Device> g_dev;
 static ComPtr<ID3D11DeviceContext> g_ctx;
 static ComPtr<ID2D1Factory1> g_d2d;
@@ -209,14 +227,14 @@ static ComPtr<ID3D11Texture2D> g_uiTex;
 static ComPtr<ID3D11ShaderResourceView> g_uiSrv;
 static ComPtr<ID2D1RenderTarget> g_uiRt;
 
-static ComPtr<ID3D11Texture2D> g_outTex; // shared, 2 eyes side by side
+static ComPtr<ID3D11Texture2D> g_outTex; // 2 eyes side by side (drawn here, then published)
+static ComPtr<ID3D11Texture2D> g_slotTex[ATRIUM_DASH_SLOTS]; // shared with games
+static ComPtr<ID3D11Query> g_doneQuery;
 static ComPtr<ID3D11RenderTargetView> g_outRtv;
 static ComPtr<ID3D11DepthStencilView> g_depth;
-static HANDLE g_outShared;
+static HANDLE g_slotShared[ATRIUM_DASH_SLOTS];
 
 static HANDLE g_shmMap;
-static AtriumDashShared* g_shm;
-
 static bool CreateGraphics()
 {
 	UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -244,32 +262,42 @@ static bool CreateGraphics()
 	if (FAILED(g_d2d->CreateDxgiSurfaceRenderTarget(surf.Get(), &rp, &g_uiRt))) { Log("no D2D target"); return false; }
 	g_uiRt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-	// The shared stereo picture.
+	// The stereo picture (drawn here) and the three shared slots finished pictures go into.
 	td.Width = kEyeW * 2; td.Height = kEyeH;
 	td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-	td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-	if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_outTex))) { Log("no shared texture"); return false; }
+	if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_outTex))) { Log("no picture texture"); return false; }
 	g_dev->CreateRenderTargetView(g_outTex.Get(), nullptr, &g_outRtv);
-	ComPtr<IDXGIResource1> res;
-	g_outTex.As(&res);
-	if (FAILED(res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, g_preview ? L"Local\AtriumDashPreviewTexture" : ATRIUM_DASH_TEXTURE, &g_outShared))) {
-		Log("couldn't share the texture (another atrium-dash running?)");
-		return false;
+	for (int s = 0; s < ATRIUM_DASH_SLOTS; s++) {
+		D3D11_TEXTURE2D_DESC sd = td;
+		sd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+		if (FAILED(g_dev->CreateTexture2D(&sd, nullptr, &g_slotTex[s]))) { Log("no shared texture"); return false; }
+		ComPtr<IDXGIResource1> res;
+		g_slotTex[s].As(&res);
+		wchar_t name[64];
+		swprintf_s(name, L"%s%d", g_preview ? L"Local\\AtriumDashPreviewTexture" : ATRIUM_DASH_TEXTURE, s);
+		if (FAILED(res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, name, &g_slotShared[s]))) {
+			Log("couldn't share the texture (another atrium-dash running?)");
+			return false;
+		}
 	}
+	D3D11_QUERY_DESC qd = { D3D11_QUERY_EVENT, 0 };
+	g_dev->CreateQuery(&qd, &g_doneQuery);
 	D3D11_TEXTURE2D_DESC dd = td;
 	dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL; dd.MiscFlags = 0;
 	ComPtr<ID3D11Texture2D> depthTex;
 	g_dev->CreateTexture2D(&dd, nullptr, &depthTex);
 	g_dev->CreateDepthStencilView(depthTex.Get(), nullptr, &g_depth);
 
-	g_shmMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(AtriumDashShared), g_preview ? L"Local\AtriumDashPreviewShared" : ATRIUM_DASH_SHARED);
+	g_shmMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(AtriumDashShared), g_preview ? L"Local\\AtriumDashPreviewShared" : ATRIUM_DASH_SHARED);
 	if (!g_shmMap) return false;
 	g_shm = (AtriumDashShared*)MapViewOfFile(g_shmMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(AtriumDashShared));
 	if (!g_shm) return false;
 	ZeroMemory(g_shm, sizeof *g_shm);
 	g_shm->version = ATRIUM_DASH_VERSION;
+	g_shm->latestSlot = 0;
 	g_shm->eyeWidth = kEyeW;
 	g_shm->eyeHeight = kEyeH;
+	PublishControls();
 	MemoryBarrier();
 	g_shm->magic = ATRIUM_DASH_MAGIC;
 	return true;
@@ -1053,7 +1081,7 @@ static void DrawControls(float x0, float y0, float w, float h)
 	float ry = y0 + 100;
 	label(R, ry, L"Button remapping", L"What games get when you press each button; from the next game start");
 	ry += 74;
-	for (int i = 0; i < kButtonCount; i++) {
+	for (int i = 0; i < kRemapCount; i++) {
 		std::string from = kButtons[i].id;
 		auto it = g_look.remap.find(from);
 		std::string to = it == g_look.remap.end() ? from : it->second;
@@ -1063,13 +1091,13 @@ static void DrawControls(float x0, float y0, float w, float h)
 		Button({ R + 300, rowY + 4, R + colW, rowY + 62 }, to == from ? std::wstring(L"Same") : std::wstring(ButtonName(to)), [from, to] {
 			// Next target in the list (wrapping to "same").
 			int at = 0;
-			for (int k = 0; k < kButtonCount; k++) if (to == kButtons[k].id) at = k;
-			std::string next = kButtons[(at + 1) % kButtonCount].id;
+			for (int k = 0; k < kRemapCount; k++) if (to == kButtons[k].id) at = k;
+			std::string next = kButtons[(at + 1) % kRemapCount].id;
 			if (next == from) g_look.remap.erase(from); else g_look.remap[from] = next;
 			SaveLook();
 		}, false, to != from);
 	}
-	Button({ R, ry + kButtonCount * 72 + 6, R + 300, ry + kButtonCount * 72 + 64 }, L"Reset all", [] { g_look.remap.clear(); SaveLook(); });
+	Button({ R, ry + kRemapCount * 72 + 6, R + 300, ry + kRemapCount * 72 + 64 }, L"Reset all", [] { g_look.remap.clear(); SaveLook(); });
 	(void)h;
 }
 
@@ -1402,11 +1430,21 @@ static void DashFrame(const AtriumDashInput& in, bool home)
 		lastUi = g_time;
 	}
 	RenderEyes(in, home);
-	for (int e = 0; e < 2; e++) {
-		g_shm->renderedEye[e] = in.eye[e];
-		g_shm->renderedFov[e] = in.fov[e];
+	if (!home) {
+		// Publish: into the slot after the latest, finished on the GPU before games may take it.
+		int slot = (g_shm->latestSlot + 1) % ATRIUM_DASH_SLOTS;
+		g_ctx->CopyResource(g_slotTex[slot].Get(), g_outTex.Get());
+		g_ctx->End(g_doneQuery.Get());
+		g_ctx->Flush();
+		BOOL done = FALSE;
+		while (g_ctx->GetData(g_doneQuery.Get(), &done, sizeof done, 0) == S_FALSE) YieldProcessor();
+		for (int e = 0; e < 2; e++) {
+			g_shm->slotEye[slot][e] = in.eye[e];
+			g_shm->slotFov[slot][e] = in.fov[e];
+		}
+		MemoryBarrier();
+		g_shm->latestSlot = slot;
 	}
-	MemoryBarrier();
 	g_shm->frameSeq++;
 }
 
