@@ -17,8 +17,26 @@ pub fn available() -> bool {
     sys::native_tool("atrium-dash.exe").is_some()
 }
 
-/// Start atrium-dash; each line it prints goes to `on_command`.
-pub fn start(on_command: impl Fn(String) + Send + 'static) -> Result<(), String> {
+/// Start atrium-dash; each line it prints goes to `on_command`. If it ends (a crash, or swapped
+/// for a new build), it's started again a few seconds later.
+pub fn start(on_command: impl Fn(String) + Send + Sync + 'static) -> Result<(), String> {
+    let on_command = std::sync::Arc::new(on_command);
+    let first = start_once(on_command.clone());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if STDIN.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            let c = on_command.clone();
+            match start_once(c) {
+                Ok(()) => sys::log("dash: started again"),
+                Err(e) => sys::log(&e),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+    first
+}
+
+fn start_once(on_command: std::sync::Arc<dyn Fn(String) + Send + Sync>) -> Result<(), String> {
     let exe = sys::native_tool("atrium-dash.exe").ok_or("atrium-dash isn't built (native\\atrium_dash)")?;
     let mut cmd = Command::new(&exe);
     cmd.current_dir(exe.parent().unwrap_or(std::path::Path::new("."))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

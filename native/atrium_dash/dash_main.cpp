@@ -1464,6 +1464,11 @@ static bool RunHome()
 			}
 			ev = { XR_TYPE_EVENT_DATA_BUFFER };
 		}
+		// The app's latest word: a game started (no home), or start home again.
+		{
+			std::lock_guard<std::mutex> lk(g_stateLock);
+			g_homeWanted = g_state["home"].truthy();
+		}
 		if ((!g_homeWanted || g_restartHome.exchange(false)) && running) { xrRequestExitSession(session); }
 		if (!running) { Sleep(20); if (!g_homeWanted) break; continue; }
 
