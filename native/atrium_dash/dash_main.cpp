@@ -56,6 +56,7 @@ static const float kPi = 3.14159265f;
 
 // ---- log ------------------------------------------------------------------------------------
 static std::wstring g_dataDir;
+static bool g_preview; // --preview: own shared names, never touch the real mouse
 static std::mutex g_logLock;
 
 static void Log(const char* fmt, ...)
@@ -127,7 +128,20 @@ struct Look
 	float curve = 0.55f;    // 0 flat .. 1 strongly curved
 	int accent = 0;
 	bool environment = true; // home: draw the environment
+	// Controls (also read by the Atrium Runtime inside games):
+	std::string openButton = "left_menu"; // which button opens the dash
+	bool openHold = true;                  // hold it (a short press still reaches the game) or press it
+	bool pauseGame = false;                // the game loses focus (pauses) while the dash is open
+	std::map<std::string, std::string> remap; // button -> button, for games (from the next start)
 };
+
+// Touch buttons Atrium can use for the dash and remap for games (ids as in dash.json).
+struct ButtonDef { const char* id; const wchar_t* name; };
+static const ButtonDef kButtons[] = {
+	{ "left_menu", L"Menu" }, { "x", L"X" }, { "y", L"Y" }, { "a", L"A" }, { "b", L"B" },
+	{ "left_stick", L"L stick" }, { "right_stick", L"R stick" },
+};
+static const int kButtonCount = sizeof kButtons / sizeof kButtons[0];
 static Look g_look;
 
 struct Accent { const char* name; float r, g, b; };
@@ -141,8 +155,13 @@ static void SaveLook()
 {
 	FILE* f = nullptr;
 	if (_wfopen_s(&f, (g_dataDir + L"\\dash.json").c_str(), L"w") || !f) return;
-	fprintf(f, "{ \"distance\": %.3f, \"width\": %.3f, \"curve\": %.3f, \"accent\": %d, \"environment\": %s }\n", g_look.distance,
-		g_look.width, g_look.curve, g_look.accent, g_look.environment ? "true" : "false");
+	// "remap" is one string ("x=a,a=x") so the runtime's small JSON reader can take it.
+	std::string remap;
+	for (auto& r : g_look.remap) remap += (remap.empty() ? "" : ",") + r.first + "=" + r.second;
+	fprintf(f, "{ \"distance\": %.3f, \"width\": %.3f, \"curve\": %.3f, \"accent\": %d, \"environment\": %s,\n"
+		"  \"openButton\": \"%s\", \"openMode\": \"%s\", \"pauseGame\": \"%s\", \"remap\": \"%s\" }\n", g_look.distance,
+		g_look.width, g_look.curve, g_look.accent, g_look.environment ? "true" : "false", g_look.openButton.c_str(),
+		g_look.openHold ? "hold" : "press", g_look.pauseGame ? "on" : "off", remap.c_str());
 	fclose(f);
 }
 
@@ -161,6 +180,18 @@ static void LoadLook()
 	g_look.curve = (float)j["curve"].num(g_look.curve);
 	g_look.accent = (int)j["accent"].num(0) % kAccentCount;
 	g_look.environment = j["environment"].type == Json::Bool ? j["environment"].b : true;
+	g_look.openButton = j["openButton"].str("left_menu");
+	g_look.openHold = j["openMode"].str("hold") != "press";
+	g_look.pauseGame = j["pauseGame"].str("off") == "on";
+	std::string remap = j["remap"].str("");
+	for (size_t i = 0; i < remap.size();) {
+		size_t end = remap.find(',', i);
+		if (end == std::string::npos) end = remap.size();
+		std::string pair = remap.substr(i, end - i);
+		size_t eq = pair.find('=');
+		if (eq != std::string::npos) g_look.remap[pair.substr(0, eq)] = pair.substr(eq + 1);
+		i = end + 1;
+	}
 }
 
 // ---- graphics -------------------------------------------------------------------------------
@@ -221,7 +252,7 @@ static bool CreateGraphics()
 	g_dev->CreateRenderTargetView(g_outTex.Get(), nullptr, &g_outRtv);
 	ComPtr<IDXGIResource1> res;
 	g_outTex.As(&res);
-	if (FAILED(res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, ATRIUM_DASH_TEXTURE, &g_outShared))) {
+	if (FAILED(res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, g_preview ? L"Local\AtriumDashPreviewTexture" : ATRIUM_DASH_TEXTURE, &g_outShared))) {
 		Log("couldn't share the texture (another atrium-dash running?)");
 		return false;
 	}
@@ -231,7 +262,7 @@ static bool CreateGraphics()
 	g_dev->CreateTexture2D(&dd, nullptr, &depthTex);
 	g_dev->CreateDepthStencilView(depthTex.Get(), nullptr, &g_depth);
 
-	g_shmMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(AtriumDashShared), ATRIUM_DASH_SHARED);
+	g_shmMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(AtriumDashShared), g_preview ? L"Local\AtriumDashPreviewShared" : ATRIUM_DASH_SHARED);
 	if (!g_shmMap) return false;
 	g_shm = (AtriumDashShared*)MapViewOfFile(g_shmMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(AtriumDashShared));
 	if (!g_shm) return false;
@@ -548,7 +579,7 @@ static void Draw(const Mesh& m, const M4& model, int mode, const float color[4],
 static Pose g_anchor;       // the panel's pivot (centre of its curve), world-locked
 static bool g_anchored = false;
 
-enum class Tab { Library, Playing, Desktop, Devices, Settings };
+enum class Tab { Library, Playing, Desktop, Devices, Settings, Controls };
 
 // ---- sound: the default speakers and microphone (the headset's while it's in use) -----------
 static ComPtr<IAudioEndpointVolume> Endpoint(EDataFlow flow)
@@ -594,7 +625,6 @@ static RECT g_deskScreen; // the monitor in Windows' desktop coordinates
 static D2D1_RECT_F g_deskRect; // where it's drawn on the panel (UI pixels)
 static bool g_deskButtonDown;
 static int g_deskFrames;
-static bool g_preview; // --preview: never touch the real mouse
 
 static bool DesktopFrame()
 {
@@ -835,6 +865,8 @@ static void DrawLibrary(const Json& st, float x0, float y0, float w, float h)
 	}
 }
 
+static const wchar_t* ButtonName(const std::string& id);
+
 static void DrawPlaying(const Json& st, float x0, float y0, float w, float h)
 {
 	const Json& run = st["running"];
@@ -872,7 +904,8 @@ static void DrawPlaying(const Json& st, float x0, float y0, float w, float h)
 	std::string id = run["id"].str();
 	Button({ x0 + 500, by, x0 + 960, by + 110 }, L"Quit game", [id] { Cmd("{\"cmd\":\"quitGame\",\"id\":" + JsonQuote(id) + "}"); Toast(L"Closing the game"); });
 	quick(by + 150);
-	Text(L"Hold the left menu button to open or close the dash at any time.", { x0, y0 + h - 50, x0 + w, y0 + h }, 26, Col(0.6f, 0.65f, 0.75f));
+	Text(std::wstring(g_look.openHold ? L"Hold " : L"Press ") + ButtonName(g_look.openButton) + L" to open or close the dash at any time (Controls tab).",
+		{ x0, y0 + h - 50, x0 + w, y0 + h }, 26, Col(0.6f, 0.65f, 0.75f));
 }
 
 static bool g_deskReady;
@@ -982,6 +1015,64 @@ static void DrawSettings(const Json& st, float x0, float y0, float w, float)
 	choice(R, ry + 74, { { L"Space", [] { g_look.environment = true; SaveLook(); } }, { L"Plain", [] { g_look.environment = false; SaveLook(); } } }, g_look.environment ? 0 : 1);
 }
 
+static const wchar_t* ButtonName(const std::string& id)
+{
+	for (const ButtonDef& b : kButtons)
+		if (id == b.id) return b.name;
+	return L"?";
+}
+
+static void DrawControls(float x0, float y0, float w, float h)
+{
+	Text(L"Controls", { x0, y0, x0 + w, y0 + 90 }, 64, Col(1, 1, 1), DWRITE_FONT_WEIGHT_BOLD);
+	float colW = (w - 60) / 2, L = x0, R = x0 + colW + 60;
+	auto label = [&](float x, float yy, const std::wstring& t, const std::wstring& sub) {
+		Text(t, { x, yy, x + colW, yy + 40 }, 31, Col(1, 1, 1), DWRITE_FONT_WEIGHT_SEMI_BOLD);
+		Text(sub, { x, yy + 36, x + colW, yy + 66 }, 22, Col(0.6f, 0.65f, 0.75f));
+	};
+	// Left: the dash button and how it opens.
+	float y = y0 + 100;
+	label(L, y, L"Dash button", L"Which button opens and closes the dash in games");
+	float bw = (colW - 12 * 3) / 4;
+	for (int i = 0; i < kButtonCount; i++) {
+		int r = i / 4, c = i % 4;
+		std::string id = kButtons[i].id;
+		Button({ L + c * (bw + 12), y + 74 + r * 74, L + c * (bw + 12) + bw, y + 136 + r * 74 }, kButtons[i].name,
+			[id] { g_look.openButton = id; SaveLook(); }, false, g_look.openButton == id);
+	}
+	y += 240;
+	label(L, y, L"Open the dash by", g_look.openHold ? L"Holding the button (a short press still reaches the game)" : L"Pressing the button (the game never sees it)");
+	Button({ L, y + 74, L + colW / 2 - 6, y + 136 }, L"Holding", [] { g_look.openHold = true; SaveLook(); }, false, g_look.openHold);
+	Button({ L + colW / 2 + 6, y + 74, L + colW, y + 136 }, L"Pressing", [] { g_look.openHold = false; SaveLook(); }, false, !g_look.openHold);
+	y += 160;
+	label(L, y, L"Pause the game while the dash is open", L"Some games slow down while paused, which makes the dash stutter");
+	Button({ L, y + 74, L + colW / 2 - 6, y + 136 }, L"Keep running", [] { g_look.pauseGame = false; SaveLook(); }, false, !g_look.pauseGame);
+	Button({ L + colW / 2 + 6, y + 74, L + colW, y + 136 }, L"Pause", [] { g_look.pauseGame = true; SaveLook(); }, false, g_look.pauseGame);
+
+	// Right: remapping for games. Each button cycles through what the game gets instead.
+	float ry = y0 + 100;
+	label(R, ry, L"Button remapping", L"What games get when you press each button; from the next game start");
+	ry += 74;
+	for (int i = 0; i < kButtonCount; i++) {
+		std::string from = kButtons[i].id;
+		auto it = g_look.remap.find(from);
+		std::string to = it == g_look.remap.end() ? from : it->second;
+		float rowY = ry + i * 72;
+		Text(kButtons[i].name, { R, rowY, R + 220, rowY + 62 }, 30, Col(0.9f, 0.92f, 1), DWRITE_FONT_WEIGHT_SEMI_BOLD);
+		Text(L"→", { R + 220, rowY, R + 290, rowY + 62 }, 30, Col(0.6f, 0.65f, 0.75f));
+		Button({ R + 300, rowY + 4, R + colW, rowY + 62 }, to == from ? std::wstring(L"Same") : std::wstring(ButtonName(to)), [from, to] {
+			// Next target in the list (wrapping to "same").
+			int at = 0;
+			for (int k = 0; k < kButtonCount; k++) if (to == kButtons[k].id) at = k;
+			std::string next = kButtons[(at + 1) % kButtonCount].id;
+			if (next == from) g_look.remap.erase(from); else g_look.remap[from] = next;
+			SaveLook();
+		}, false, to != from);
+	}
+	Button({ R, ry + kButtonCount * 72 + 6, R + 300, ry + kButtonCount * 72 + 64 }, L"Reset all", [] { g_look.remap.clear(); SaveLook(); });
+	(void)h;
+}
+
 static void DrawToolbar(const Json& st)
 {
 	float y0 = (float)kPanelPxH, h = (float)kBarPxH;
@@ -989,17 +1080,17 @@ static void DrawToolbar(const Json& st)
 	g_uiRt->FillRoundedRectangle(bg, Brush(Col(0.02f, 0.025f, 0.05f, 0.55f)).Get());
 	struct T { Tab tab; const wchar_t* name; };
 	T tabs[] = { { Tab::Library, L"Library" }, { Tab::Playing, L"Playing" }, { Tab::Desktop, L"Desktop" }, { Tab::Devices, L"Devices" },
-		{ Tab::Settings, L"Settings" } };
-	float x = 60, bw = 268, bh = 112, by = y0 + (h - bh) / 2;
+		{ Tab::Settings, L"Settings" }, { Tab::Controls, L"Controls" } };
+	float x = 44, bw = 222, bh = 112, by = y0 + (h - bh) / 2;
 	for (const T& t : tabs) {
 		Tab tab = t.tab;
 		Button({ x, by, x + bw, by + bh }, t.name, [tab] { g_tab = tab; g_scroll = 0; }, false, g_tab == tab, true);
-		x += bw + 24;
+		x += bw + 18;
 	}
-	Text(Clock(), { x + 10, by, x + 260, by + bh }, 56, Col(1, 1, 1), DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+	Text(Clock(), { x, by, x + 200, by + bh }, 52, Col(1, 1, 1), DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
 	bool home = g_shm->homeActive != 0;
 	if (!home)
-		Button({ (float)kUiW - 70 - 250, by, (float)kUiW - 70, by + bh }, L"Close", [] { g_shm->open = 0; Cmd("{\"cmd\":\"dashClosed\"}"); }, true, false, true);
+		Button({ (float)kUiW - 44 - 210, by, (float)kUiW - 44, by + bh }, L"Close", [] { g_shm->open = 0; Cmd("{\"cmd\":\"dashClosed\"}"); }, true, false, true);
 	(void)st;
 }
 
@@ -1036,6 +1127,7 @@ static void DrawUi(const Json& st)
 	case Tab::Devices: DrawDevices(st, x0, y0, w, h); break;
 	case Tab::Settings: DrawSettings(st, x0, y0, w, h); break;
 	case Tab::Desktop: DrawDesktop(x0, y0, w, h); break;
+	case Tab::Controls: DrawControls(x0, y0, w, h); break;
 	}
 	if (g_time < g_toastUntil && !g_toast.empty()) {
 		D2D1_RECT_F r = { (float)kUiW / 2 - 450, (float)kPanelPxH - 130, (float)kUiW / 2 + 450, (float)kPanelPxH - 50 };
@@ -1666,6 +1758,7 @@ static int Preview(const std::wstring& stateFile, const std::wstring& outDir, co
 	if (tab == L"devices") g_tab = Tab::Devices;
 	if (tab == L"playing") g_tab = Tab::Playing;
 	if (tab == L"desktop") g_tab = Tab::Desktop;
+	if (tab == L"controls") g_tab = Tab::Controls;
 	auto pose = [](V3 p, Q q) { return Pose(p, q).raw(); };
 	AtriumDashInput in = {};
 	Q look = Q::axisAngle(V3(1, 0, 0), -0.10f);
@@ -1708,13 +1801,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 	}
 	SHCreateDirectoryExW(nullptr, (g_dataDir + L"\\logs").c_str(), nullptr);
 	LoadLook();
+	int argc = 0;
+	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+	g_preview = argc >= 4 && wcscmp(argv[1], L"--preview") == 0;
 	if (!CreateGraphics() || !Create3D()) {
 		Log("start failed");
 		return 1;
 	}
-	int argc = 0;
-	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-	g_preview = argc >= 4 && wcscmp(argv[1], L"--preview") == 0;
 	if (g_preview) return Preview(argv[2], argv[3], argc >= 5 ? argv[4] : L"");
 	Log("atrium-dash ready (%ux%u per eye)", kEyeW, kEyeH);
 	std::thread(StdinThread).detach();

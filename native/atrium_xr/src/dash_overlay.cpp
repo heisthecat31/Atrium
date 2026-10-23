@@ -5,8 +5,10 @@
 //   - Atrium's own actions ride along with the game's: aim and grip poses, trigger, squeeze, stick,
 //     haptics and the left menu button, added to the bindings the game suggests (only for the
 //     controllers the game itself binds, so the runtime picks the same controller profile).
-//   - Holding the left menu button (0.45 s) opens or closes the dash. A shorter press still
-//     reaches the game, once the button is let go.
+//   - The dash button (Controls tab: menu, X, Y, A, B or a stick click; held 0.45 s or pressed)
+//     opens or closes the dash. Held: a shorter press still reaches the game, once let go.
+//     Pressed: the game never sees that button.
+//   - Button remapping (Controls tab) rewrites the game's Touch bindings when it suggests them.
 //   - While the dash is open the game loses input focus, as under Oculus Dash (it's told its
 //     session went VISIBLE, so it pauses, mutes and hides its hands), its actions aren't synced
 //     (it sees no input), and each
@@ -29,6 +31,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include <shlobj.h>
 #include "../../atrium_dash/atrium_dash_shared.h"
 #include "dash_overlay.h"
 
@@ -65,11 +68,17 @@ struct DashState
 	// Atrium's actions.
 	XrActionSet set = XR_NULL_HANDLE;
 	XrAction aim = XR_NULL_HANDLE, grip = XR_NULL_HANDLE, trigger = XR_NULL_HANDLE, squeeze = XR_NULL_HANDLE;
-	XrAction stick = XR_NULL_HANDLE, menu = XR_NULL_HANDLE, buzz = XR_NULL_HANDLE;
+	XrAction stick = XR_NULL_HANDLE, buzz = XR_NULL_HANDLE;
+	XrAction button[7] = {}; // one per kButtons entry (the dash button can be any of them)
 	XrPath hand[2] = {};
 	bool suggested = false; // ours went out with at least one of the game's profiles
 	bool attached = false;
-	std::set<uint64_t> gameMenuActions; // the game's actions on the left menu button
+	std::set<uint64_t> gameButtonActions[7]; // the game's actions on each kButtons entry
+
+	// Controls tab (dash.json), re-read every second.
+	int openButton = 0;
+	bool openHold = true, pauseGame = false;
+	ULONGLONG controlsRead = 0;
 	XrSpace local = XR_NULL_HANDLE, aimSpace[2] = {}, gripSpace[2] = {};
 
 	// Menu button: hold to toggle the dash, short presses go through to the game late.
@@ -153,10 +162,93 @@ static void EnsureActions(XrInstance inst)
 	make("trigger", XR_ACTION_TYPE_FLOAT_INPUT, d.trigger);
 	make("squeeze", XR_ACTION_TYPE_FLOAT_INPUT, d.squeeze);
 	make("stick", XR_ACTION_TYPE_VECTOR2F_INPUT, d.stick);
-	make("menu", XR_ACTION_TYPE_BOOLEAN_INPUT, d.menu);
+	for (int i = 0; i < 7; i++) {
+		// No hand: each is one button.
+		XrActionCreateInfo ai = { XR_TYPE_ACTION_CREATE_INFO };
+		snprintf(ai.actionName, sizeof ai.actionName, "atrium_dash_button_%d", i);
+		snprintf(ai.localizedActionName, sizeof ai.localizedActionName, "Atrium dash button %d", i);
+		ai.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+		BK(inst, xrCreateAction)(d.set, &ai, &d.button[i]);
+	}
 	make("buzz", XR_ACTION_TYPE_VIBRATION_OUTPUT, d.buzz);
 	AtriumLog("dash: actions ready");
 }
+
+// The buttons the dash can use and games can have remapped (ids as the dash's Controls tab).
+struct ButtonPath { const char* id; const char* base; bool touch; };
+static const ButtonPath kButtons[7] = {
+	{ "left_menu", "/user/hand/left/input/menu", false }, { "x", "/user/hand/left/input/x", true },
+	{ "y", "/user/hand/left/input/y", true }, { "a", "/user/hand/right/input/a", true }, { "b", "/user/hand/right/input/b", true },
+	{ "left_stick", "/user/hand/left/input/thumbstick", true }, { "right_stick", "/user/hand/right/input/thumbstick", true },
+};
+
+static std::string DashJson()
+{
+	PWSTR roaming = nullptr;
+	if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming))) return {};
+	std::wstring path = std::wstring(roaming) + L"\\Atrium\\dash.json";
+	CoTaskMemFree(roaming);
+	FILE* f = nullptr;
+	std::string s;
+	if (_wfopen_s(&f, path.c_str(), L"rb") || !f) return s;
+	char b[2048];
+	size_t n;
+	while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n);
+	fclose(f);
+	return s;
+}
+
+// A string value from dash.json ("" when missing).
+static std::string DashSetting(const std::string& json, const char* key)
+{
+	std::string needle = std::string("\"") + key + "\"";
+	size_t at = json.find(needle);
+	if (at == std::string::npos) return {};
+	at = json.find('"', json.find(':', at + needle.size()));
+	size_t end = at == std::string::npos ? at : json.find('"', at + 1);
+	return end == std::string::npos ? std::string() : json.substr(at + 1, end - at - 1);
+}
+
+static void ReadControls()
+{
+	DashState& d = g_dash;
+	if (GetTickCount64() - d.controlsRead < 1000) return;
+	d.controlsRead = GetTickCount64();
+	std::string j = DashJson();
+	std::string b = DashSetting(j, "openButton");
+	d.openButton = 0;
+	for (int i = 0; i < 7; i++) if (b == kButtons[i].id) d.openButton = i;
+	d.openHold = DashSetting(j, "openMode") != "press";
+	d.pauseGame = DashSetting(j, "pauseGame") == "on";
+}
+
+// The game's binding path after the Controls tab's remapping ("x=a,a=x"): same if not remapped,
+// empty if the remapped button lacks that input (a touch sensor on the menu button).
+static std::string Remapped(const std::string& path, const std::string& remap)
+{
+	for (size_t i = 0; i < remap.size();) {
+		size_t end = remap.find(',', i);
+		if (end == std::string::npos) end = remap.size();
+		std::string pair = remap.substr(i, end - i);
+		i = end + 1;
+		size_t eq = pair.find('=');
+		if (eq == std::string::npos) continue;
+		const ButtonPath *from = nullptr, *to = nullptr;
+		for (const ButtonPath& k : kButtons) {
+			if (pair.substr(0, eq) == k.id) from = &k;
+			if (pair.substr(eq + 1) == k.id) to = &k;
+		}
+		if (!from || !to) continue;
+		for (const char* suffix : { "/click", "/touch" }) {
+			if (path != std::string(from->base) + suffix) continue;
+			if (strcmp(suffix, "/touch") == 0 && !to->touch) return {};
+			return std::string(to->base) + suffix;
+		}
+	}
+	return path;
+}
+
+static bool TouchFamily(const char* profile) { return strstr(profile, "touch") != nullptr; }
 
 struct ProfilePaths { const char* profile; const char* trigger; const char* squeeze; const char* stick; const char* menu; };
 static const ProfilePaths kProfiles[] = {
@@ -188,7 +280,12 @@ static void AddOurBindings(XrInstance inst, const ProfilePaths& p, std::vector<X
 		if (p.stick) out.push_back({ d.stick, Path(inst, (s + p.stick).c_str()) });
 		out.push_back({ d.buzz, Path(inst, (s + "/output/haptic").c_str()) });
 	}
-	out.push_back({ d.menu, Path(inst, p.menu) });
+	// The dash button candidates: all of them on Touch, the menu button elsewhere.
+	if (TouchFamily(p.profile)) {
+		for (int i = 0; i < 7; i++) out.push_back({ d.button[i], Path(inst, (std::string(kButtons[i].base) + "/click").c_str()) });
+	} else {
+		out.push_back({ d.button[0], Path(inst, p.menu) });
+	}
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* b)
@@ -198,11 +295,29 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 	EnsureActions(instance);
 	const ProfilePaths* p = b ? FindProfile(instance, b->interactionProfile) : nullptr;
 	if (!p || !g_dash.set || g_dash.attached) return next(instance, b);
-	// Remember the game's actions on the dash's menu button: they see presses late (see top).
-	XrPath menuPath = Path(instance, p->menu);
-	for (uint32_t i = 0; i < b->countSuggestedBindings; i++)
-		if (b->suggestedBindings[i].binding == menuPath) g_dash.gameMenuActions.insert((uint64_t)b->suggestedBindings[i].action);
-	std::vector<XrActionSuggestedBinding> all(b->suggestedBindings, b->suggestedBindings + b->countSuggestedBindings);
+	// The game's Touch bindings, remapped as the Controls tab says.
+	std::vector<XrActionSuggestedBinding> all;
+	std::string remap = TouchFamily(p->profile) ? DashSetting(DashJson(), "remap") : std::string();
+	for (uint32_t i = 0; i < b->countSuggestedBindings; i++) {
+		XrActionSuggestedBinding sb = b->suggestedBindings[i];
+		if (!remap.empty()) {
+			char buf[XR_MAX_PATH_LENGTH];
+			uint32_t n = 0;
+			if (XR_SUCCEEDED(BK(instance, xrPathToString)(instance, sb.binding, sizeof buf, &n, buf))) {
+				std::string to = Remapped(buf, remap);
+				if (to.empty()) continue;
+				if (to != buf) sb.binding = Path(instance, to.c_str());
+			}
+		}
+		all.push_back(sb);
+	}
+	// Remember the game's actions on each dash-button candidate: filtered while it's the dash's.
+	for (const XrActionSuggestedBinding& sb : all)
+		for (int k = 0; k < 7; k++)
+			if (sb.binding == Path(instance, (std::string(kButtons[k].base) + "/click").c_str()) ||
+				(k == 0 && sb.binding == Path(instance, p->menu)))
+				g_dash.gameButtonActions[k].insert((uint64_t)sb.action);
+	size_t gameCount = all.size();
 	AddOurBindings(instance, *p, all);
 	XrInteractionProfileSuggestedBinding merged = *b;
 	merged.countSuggestedBindings = (uint32_t)all.size();
@@ -210,8 +325,10 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 	XrResult r = next(instance, &merged);
 	if (XR_FAILED(r)) {
 		AtriumLog("dash: bindings for %s refused (%d); the game's alone", p->profile, (int)r);
-		return next(instance, b);
+		merged.countSuggestedBindings = (uint32_t)gameCount;
+		return next(instance, &merged);
 	}
+	if (!remap.empty()) AtriumLog("dash: %s remapped (%s)", p->profile, remap.c_str());
 	g_dash.suggested = true;
 	return r;
 }
@@ -286,12 +403,22 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSyncActions(XrSession session, const XrAct
 	XrResult r = next(session, &si);
 	if (XR_FAILED(r)) return r;
 
+	ReadControls();
 	XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO };
-	gi.action = d.menu;
+	gi.action = d.button[d.openButton];
 	XrActionStateBoolean m = { XR_TYPE_ACTION_STATE_BOOLEAN };
 	BK(d.instance, xrGetActionStateBoolean)(session, &gi, &m);
 	ULONGLONG now = GetTickCount64();
 	if (d.passPress > 0) d.passPress--;
+	if (!d.openHold) {
+		// Pressing: every press toggles; the game never sees the button.
+		if (m.currentState && !d.menuDown) {
+			Toggle();
+			d.lastHaptic = -1;
+		}
+		d.menuDown = m.currentState != XR_FALSE;
+		return r;
+	}
 	if (m.currentState && !d.menuDown) {
 		d.menuDown = true;
 		d.menuUsed = false;
@@ -311,9 +438,9 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrGetActionStateBoolean(XrSession session, c
 {
 	XrResult r = NextFn<PFN_xrGetActionStateBoolean>("xrGetActionStateBoolean")(session, info, state);
 	DashState& d = g_dash;
-	if (XR_FAILED(r) || !info || session != d.session || !d.gameMenuActions.count((uint64_t)info->action)) return r;
-	// The game's menu button: pressed only for the late short press.
-	bool pressed = d.passPress > 0;
+	if (XR_FAILED(r) || !info || session != d.session || !d.gameButtonActions[d.openButton].count((uint64_t)info->action)) return r;
+	// The game's action on the dash button: pressed only for a late short press (held mode).
+	bool pressed = d.openHold && d.passPress > 0;
 	bool& last = d.reported[(uint64_t)info->action];
 	state->changedSinceLastSync = pressed != last;
 	state->currentState = pressed;
@@ -499,6 +626,30 @@ bool DashEndFrame(XrSession session, const XrFrameEndInfo* info, std::vector<con
 	std::lock_guard<std::mutex> lk(g_dash.lock);
 	DashState& d = g_dash;
 	if (session != d.session || !d.attached || !DashOpenHere()) return false;
+	{
+		// How fast the game's frames come while the dash is open (stutter diagnostics).
+		static LARGE_INTEGER freq, last, since;
+		static double worst;
+		static int count;
+		LARGE_INTEGER now;
+		if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+		QueryPerformanceCounter(&now);
+		if (last.QuadPart) {
+			double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+			if (ms > worst) worst = ms;
+			count++;
+			if ((now.QuadPart - since.QuadPart) > freq.QuadPart * 2) {
+				AtriumLog("dash: game at %.0f fps with the dash open, worst frame %.1f ms, dash pictures %d", count * 1.0 * freq.QuadPart / (now.QuadPart - since.QuadPart),
+					worst, d.shm->frameSeq);
+				since = now;
+				worst = 0;
+				count = 0;
+			}
+		} else {
+			since = now;
+		}
+		last = now;
+	}
 	if (!EnsurePicture(session)) return false;
 	XrInstance inst = d.instance;
 
@@ -606,7 +757,8 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrPollEvent(XrInstance instance, XrEventData
 {
 	auto next = NextFn<PFN_xrPollEvent>("xrPollEvent");
 	if (g_dash.session && g_realState == XR_SESSION_STATE_FOCUSED) {
-		bool open = DashOpenHere();
+		ReadControls();
+		bool open = DashOpenHere() && g_dash.pauseGame;
 		if (open && g_toldState == XR_SESSION_STATE_FOCUSED) { StateEvent(ev, XR_SESSION_STATE_VISIBLE); AtriumLog("dash: game told VISIBLE"); return XR_SUCCESS; }
 		if (!open && g_toldState == XR_SESSION_STATE_VISIBLE) { StateEvent(ev, XR_SESSION_STATE_FOCUSED); AtriumLog("dash: game told FOCUSED"); return XR_SUCCESS; }
 	}
@@ -615,7 +767,7 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrPollEvent(XrInstance instance, XrEventData
 		auto* sc = (XrEventDataSessionStateChanged*)ev;
 		if (sc->session == g_dash.session) {
 			g_realState = sc->state;
-			if (sc->state == XR_SESSION_STATE_FOCUSED && DashOpenHere()) sc->state = XR_SESSION_STATE_VISIBLE;
+			if (sc->state == XR_SESSION_STATE_FOCUSED && DashOpenHere() && g_dash.pauseGame) sc->state = XR_SESSION_STATE_VISIBLE;
 			g_toldState = sc->state;
 		}
 	}
