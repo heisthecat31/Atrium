@@ -1478,6 +1478,8 @@ static void OculusButtonThread()
 	LONGLONG offset = -1;
 	ULONGLONG nextScan = 0;
 	std::string pending;
+	bool oculusDown = false, oculusUsed = false;
+	ULONGLONG oculusSince = 0;
 	while (!g_quit) {
 		if (GetTickCount64() >= nextScan) {
 			// The newest service log (OVRServer starts a new one each time it starts).
@@ -1511,12 +1513,25 @@ static void OculusButtonThread()
 					pending.append(buf.data(), got);
 					size_t nlPos;
 					while ((nlPos = pending.find('\n')) != std::string::npos) {
-						if (pending.find("Oculus Button: true") < nlPos) OculusPressed();
+						// Pressing: toggle on press. Holding: toggle once it's been held long enough
+						// (timed below, between the press and release lines).
+						if (pending.find("Oculus Button: true") < nlPos) {
+							if (!g_look.openHold) OculusPressed();
+							oculusDown = true;
+							oculusUsed = false;
+							oculusSince = GetTickCount64();
+						} else if (pending.find("Oculus Button: false") < nlPos) {
+							oculusDown = false;
+						}
 						pending.erase(0, nlPos + 1);
 					}
 				}
 				CloseHandle(f);
 			}
+		}
+		if (g_look.openHold && oculusDown && !oculusUsed && GetTickCount64() - oculusSince >= 450) {
+			oculusUsed = true;
+			OculusPressed();
 		}
 		Sleep(25);
 	}
