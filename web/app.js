@@ -528,8 +528,8 @@ function riftSettings() {
     <p style="margin:0 0 10px">For wired Rift headsets. Atrium applies these to Meta's runtime now and every time it starts it.</p>
     ${setRow('Supersampling', 'Renders games sharper at a GPU cost (pixels per display pixel).', pick('rift', 'supersampling', 'num', ss, r.supersampling))}
     ${setRow('Asynchronous SpaceWarp', 'Auto lets Meta\'s runtime fill in frames when a game falls behind; locking holds the game at a lower rate.', pick('rift', 'asw', 'str', [['auto', 'Auto'], ['off', 'Off'], ['45', 'Locked 45 Hz'], ['30', 'Locked 30 Hz'], ['18', 'Locked 18 Hz']], r.asw))}
-    ${setRow('Field of view, horizontal', 'Lower renders less of the edges for more speed.', slider('rift', 'fov_x', 0.5, 1, 0.05, r.fov_x, (v) => `${Math.round(v * 100)}%`))}
-    ${setRow('Field of view, vertical', '', slider('rift', 'fov_y', 0.5, 1, 0.05, r.fov_y, (v) => `${Math.round(v * 100)}%`))}
+    ${setRow('Field of view, horizontal', 'Below 100% renders less of the edges for more speed; above it renders a wider view.', slider('rift', 'fov_x', 0.5, 2, 0.05, r.fov_x, (v) => `${Math.round(v * 100)}%`))}
+    ${setRow('Field of view, vertical', '', slider('rift', 'fov_y', 0.5, 2, 0.05, r.fov_y, (v) => `${Math.round(v * 100)}%`))}
     ${setRow('Performance overlay', 'Meta\'s performance HUD inside the headset.', pick('rift', 'perf_hud', 'int', [[0, 'Off'], [1, 'Summary'], [2, 'Latency'], [3, 'App render'], [4, 'Compositor'], [5, 'ASW'], [6, 'Version']], r.perf_hud))}
     ${setRow('Adaptive GPU performance scale', 'Lowers resolution when the GPU falls behind.', pick('rift', 'adaptive_gpu', 'bool', [[false, 'Off'], [true, 'On']], r.adaptive_gpu))}
     ${setRow('Mipmaps on all layers', 'Smoother distant text on menus and overlays.', pick('rift', 'mipmaps_all_layers', 'bool', [[false, 'Off'], [true, 'On']], r.mipmaps_all_layers))}
