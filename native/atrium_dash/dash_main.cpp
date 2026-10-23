@@ -1050,6 +1050,8 @@ static const wchar_t* ButtonName(const std::string& id)
 	return L"?";
 }
 
+static std::string g_remapEditing; // Controls tab: the button whose remap is being chosen
+
 static void DrawControls(float x0, float y0, float w, float h)
 {
 	Text(L"Controls", { x0, y0, x0 + w, y0 + 90 }, 64, Col(1, 1, 1), DWRITE_FONT_WEIGHT_BOLD);
@@ -1077,9 +1079,30 @@ static void DrawControls(float x0, float y0, float w, float h)
 	Button({ L, y + 74, L + colW / 2 - 6, y + 136 }, L"Keep running", [] { g_look.pauseGame = false; SaveLook(); }, false, !g_look.pauseGame);
 	Button({ L + colW / 2 + 6, y + 74, L + colW, y + 136 }, L"Pause", [] { g_look.pauseGame = true; SaveLook(); }, false, g_look.pauseGame);
 
-	// Right: remapping for games. Each button cycles through what the game gets instead.
+	// Right: remapping for games. Tap a button's row, then pick what the game gets from a list.
 	float ry = y0 + 100;
-	label(R, ry, L"Button remapping", L"What games get when you press each button; from the next game start");
+	if (!g_remapEditing.empty()) {
+		std::string from = g_remapEditing;
+		auto it = g_look.remap.find(from);
+		std::string current = it == g_look.remap.end() ? from : it->second;
+		label(R, ry, std::wstring(L"When you press ") + ButtonName(from), L"the game gets:");
+		float cw = (colW - 12 * 3) / 4;
+		for (int k = 0; k <= kRemapCount; k++) {
+			// The first choice is "Same" (no remap); then every button.
+			std::string to = k == 0 ? from : kButtons[k - 1].id;
+			int r = k / 4, c = k % 4;
+			Button({ R + c * (cw + 12), ry + 74 + r * 80, R + c * (cw + 12) + cw, ry + 140 + r * 80 },
+				k == 0 ? std::wstring(L"Same") : std::wstring(kButtons[k - 1].name), [from, to] {
+					if (to == from) g_look.remap.erase(from); else g_look.remap[from] = to;
+					SaveLook();
+					g_remapEditing.clear();
+				}, false, k == 0 ? current == from : (current == to && to != from));
+		}
+		Button({ R, ry + 74 + 2 * 80 + 20, R + 300, ry + 74 + 2 * 80 + 80 }, L"Back", [] { g_remapEditing.clear(); });
+		(void)h;
+		return;
+	}
+	label(R, ry, L"Button remapping", L"Tap a button to choose what games get; from the next game start");
 	ry += 74;
 	for (int i = 0; i < kRemapCount; i++) {
 		std::string from = kButtons[i].id;
@@ -1088,14 +1111,8 @@ static void DrawControls(float x0, float y0, float w, float h)
 		float rowY = ry + i * 72;
 		Text(kButtons[i].name, { R, rowY, R + 220, rowY + 62 }, 30, Col(0.9f, 0.92f, 1), DWRITE_FONT_WEIGHT_SEMI_BOLD);
 		Text(L"→", { R + 220, rowY, R + 290, rowY + 62 }, 30, Col(0.6f, 0.65f, 0.75f));
-		Button({ R + 300, rowY + 4, R + colW, rowY + 62 }, to == from ? std::wstring(L"Same") : std::wstring(ButtonName(to)), [from, to] {
-			// Next target in the list (wrapping to "same").
-			int at = 0;
-			for (int k = 0; k < kRemapCount; k++) if (to == kButtons[k].id) at = k;
-			std::string next = kButtons[(at + 1) % kRemapCount].id;
-			if (next == from) g_look.remap.erase(from); else g_look.remap[from] = next;
-			SaveLook();
-		}, false, to != from);
+		Button({ R + 300, rowY + 4, R + colW, rowY + 62 }, to == from ? std::wstring(L"Same") : std::wstring(ButtonName(to)),
+			[from] { g_remapEditing = from; }, false, to != from);
 	}
 	Button({ R, ry + kRemapCount * 72 + 6, R + 300, ry + kRemapCount * 72 + 64 }, L"Reset all", [] { g_look.remap.clear(); SaveLook(); });
 	(void)h;

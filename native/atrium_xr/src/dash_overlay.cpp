@@ -75,6 +75,9 @@ struct DashState
 	bool attached = false;
 	std::set<uint64_t> gameButtonActions[8]; // the game's actions on each kButtons entry
 	bool systemButton = true; // the runtime took a binding on the Oculus button
+	// The game's button actions and where they're bound (logged when they change: remap checks).
+	std::unordered_map<uint64_t, std::string> gameButtonPaths;
+	std::unordered_map<uint64_t, bool> loggedState;
 
 	// Controls tab (dash.json), re-read every second.
 	int openButton = 0;
@@ -328,6 +331,15 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 		}
 		all.push_back(sb);
 	}
+	// Remember where the game's button actions are bound, for the log.
+	for (const XrActionSuggestedBinding& sb : all) {
+		char buf[XR_MAX_PATH_LENGTH];
+		uint32_t n = 0;
+		if (XR_SUCCEEDED(BK(instance, xrPathToString)(instance, sb.binding, sizeof buf, &n, buf)) && strstr(buf, "/click")) {
+			std::string& s = g_dash.gameButtonPaths[(uint64_t)sb.action];
+			s += (s.empty() ? "" : " ") + std::string(buf + strlen("/user/hand/"));
+		}
+	}
 	// Remember the game's actions on each dash-button candidate: filtered while it's the dash's.
 	for (const XrActionSuggestedBinding& sb : all)
 		for (int k = 0; k < 8; k++)
@@ -466,6 +478,20 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrGetActionStateBoolean(XrSession session, c
 {
 	XrResult r = NextFn<PFN_xrGetActionStateBoolean>("xrGetActionStateBoolean")(session, info, state);
 	DashState& d = g_dash;
+	if (XR_SUCCEEDED(r) && info) {
+		// Which button the game sees pressed (bindings after remapping), on each change.
+		auto it = d.gameButtonPaths.find((uint64_t)info->action);
+		if (it != d.gameButtonPaths.end()) {
+			bool& last = d.loggedState[(uint64_t)info->action ^ (uint64_t)info->subactionPath];
+			if ((state->currentState != XR_FALSE) != last) {
+				last = state->currentState != XR_FALSE;
+				char hand[XR_MAX_PATH_LENGTH] = "any hand";
+				uint32_t n = 0;
+				if (info->subactionPath) BK(d.instance, xrPathToString)(d.instance, info->subactionPath, sizeof hand, &n, hand);
+				AtriumLog("input: game action on [%s] for %s: %s", it->second.c_str(), hand, last ? "pressed" : "released");
+			}
+		}
+	}
 	if (XR_FAILED(r) || !info || session != d.session || !d.gameButtonActions[d.openButton].count((uint64_t)info->action)) return r;
 	// The game's action on the dash button: pressed only for a late short press (held mode).
 	bool pressed = d.openHold && d.passPress > 0;
