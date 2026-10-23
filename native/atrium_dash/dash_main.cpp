@@ -155,19 +155,41 @@ static const int kAccentCount = sizeof kAccents / sizeof kAccents[0];
 
 static void PublishControls();
 
+static void Send(const std::string& json);
+
+// The dash's settings belong to the Atrium app (its Settings page shows them too): a change made
+// here goes to it as setDash, and it saves them and writes dash.json for the Atrium Runtime.
 static void SaveLook()
 {
 	PublishControls();
-	FILE* f = nullptr;
-	if (_wfopen_s(&f, (g_dataDir + L"\\dash.json").c_str(), L"w") || !f) return;
-	// "remap" is one string ("x=a,a=x") so the runtime's small JSON reader can take it.
 	std::string remap;
-	for (auto& r : g_look.remap) remap += (remap.empty() ? "" : ",") + r.first + "=" + r.second;
-	fprintf(f, "{ \"distance\": %.3f, \"width\": %.3f, \"curve\": %.3f, \"accent\": %d, \"environment\": %s,\n"
-		"  \"openButton\": \"%s\", \"openMode\": \"%s\", \"pauseGame\": \"%s\", \"remap\": \"%s\" }\n", g_look.distance,
-		g_look.width, g_look.curve, g_look.accent, g_look.environment ? "true" : "false", g_look.openButton.c_str(),
-		g_look.openHold ? "hold" : "press", g_look.pauseGame ? "on" : "off", remap.c_str());
-	fclose(f);
+	for (auto& r : g_look.remap) remap += std::string(remap.empty() ? "" : ",") + JsonQuote(r.first) + ":" + JsonQuote(r.second);
+	char b[512];
+	snprintf(b, sizeof b, "\"distance\":%.3f,\"width\":%.3f,\"curve\":%.3f,\"accent\":%d,\"environment\":%s,\"pause_game\":%s,", g_look.distance,
+		g_look.width, g_look.curve, g_look.accent, g_look.environment ? "true" : "false", g_look.pauseGame ? "true" : "false");
+	Send(std::string("{\"cmd\":\"setDash\",\"dash\":{") + b + "\"open_button\":" + JsonQuote(g_look.openButton) +
+		",\"open_mode\":" + JsonQuote(g_look.openHold ? "hold" : "press") + ",\"remap\":{" + remap + "}}}");
+}
+
+static void BuildPanels();
+
+// The settings in the app's state (its copy is the one that counts).
+static void ApplyLook(const Json& d)
+{
+	if (d.type != Json::Object) return;
+	Look old = g_look;
+	g_look.distance = (float)d["distance"].num(g_look.distance);
+	g_look.width = (float)d["width"].num(g_look.width);
+	g_look.curve = (float)d["curve"].num(g_look.curve);
+	g_look.accent = (int)d["accent"].num(g_look.accent) % kAccentCount;
+	if (d["environment"].type == Json::Bool) g_look.environment = d["environment"].b;
+	g_look.openButton = d["open_button"].str(g_look.openButton.c_str());
+	g_look.openHold = d["open_mode"].str("hold") != "press";
+	if (d["pause_game"].type == Json::Bool) g_look.pauseGame = d["pause_game"].b;
+	g_look.remap.clear();
+	for (auto& kv : d["remap"].o) g_look.remap[kv.first] = kv.second.str();
+	if (old.distance != g_look.distance || old.width != g_look.width || old.curve != g_look.curve) BuildPanels();
+	PublishControls();
 }
 
 static void LoadLook()
@@ -1436,6 +1458,7 @@ static void DashFrame(const AtriumDashInput& in, bool home)
 	if (seq != g_lastStateSeq) {
 		std::lock_guard<std::mutex> lk(g_stateLock);
 		g_frameState = g_state;
+		ApplyLook(g_frameState["dash"]);
 		g_lastStateSeq = seq;
 		uiDirty = true;
 	}

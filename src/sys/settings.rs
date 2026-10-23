@@ -25,6 +25,84 @@ pub struct Settings {
     pub meta_installs: HashMap<String, MetaInstall>,
     /// Mix & match: another headset with these controllers (services/mix.rs).
     pub mix: MixSettings,
+    /// The in-VR dash's look and controls (services/dash.rs writes them to dash.json, which the
+    /// dash and the Atrium Runtime read). None until set: then dash.json as the dash left it.
+    pub dash: Option<DashSettings>,
+    /// Meta runtime tweaks for wired Rifts (applied to OVRServer each time it starts).
+    pub rift: RiftTweaks,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct DashSettings {
+    /// Metres from the eyes to the panel's centre.
+    pub distance: f32,
+    /// Metres along the curve.
+    pub width: f32,
+    /// 0 flat .. 1 strongly curved.
+    pub curve: f32,
+    /// Colour: 0 Aurora, 1 Mint, 2 Ember, 3 Orchid, 4 Gold.
+    pub accent: i32,
+    /// Home surroundings: space (true) or plain.
+    pub environment: bool,
+    /// left_menu, x, y, a, b, left_stick, right_stick, oculus.
+    pub open_button: String,
+    /// "hold" or "press".
+    pub open_mode: String,
+    pub pause_game: bool,
+    /// Pressing the key, games get the value (button ids as open_button, without "oculus").
+    pub remap: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for DashSettings {
+    fn default() -> Self {
+        Self {
+            distance: 1.15,
+            width: 1.70,
+            curve: 0.55,
+            accent: 0,
+            environment: true,
+            open_button: "left_menu".into(),
+            open_mode: "hold".into(),
+            pause_game: false,
+            remap: Default::default(),
+        }
+    }
+}
+
+/// Oculus Tray Tool-style tweaks, sent to OVRServer through Meta's Debug Tool CLI.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct RiftTweaks {
+    /// Pixels per display pixel (supersampling); 0 = the game's own.
+    pub supersampling: f32,
+    /// "auto", "off", "45", "30", "18".
+    pub asw: String,
+    /// FOV tangent multipliers (1 = full field of view).
+    pub fov_x: f32,
+    pub fov_y: f32,
+    /// Meta's performance HUD: 0 off, 1 summary, 2 latency, 3 app render, 4 compositor, 5 ASW, 6 version.
+    pub perf_hud: i32,
+    pub adaptive_gpu: bool,
+    pub mipmaps_all_layers: bool,
+    pub fov_stencil: bool,
+    pub touch_never_sleep: bool,
+}
+
+impl Default for RiftTweaks {
+    fn default() -> Self {
+        Self {
+            supersampling: 0.0,
+            asw: "auto".into(),
+            fov_x: 1.0,
+            fov_y: 1.0,
+            perf_hud: 0,
+            adaptive_gpu: false,
+            mipmaps_all_layers: false,
+            fov_stencil: true,
+            touch_never_sleep: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

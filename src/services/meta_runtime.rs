@@ -193,3 +193,56 @@ pub fn start() -> Result<(), String> {
 pub fn start() -> Result<(), String> {
     Err("Meta's runtime is Windows only".into())
 }
+
+/// Oculus Tray Tool-style tweaks for OVRServer, through Meta's Debug Tool CLI (they last as long
+/// as that OVRServer, so they're sent again each time it starts).
+pub fn apply_tweaks(t: &crate::sys::settings::RiftTweaks) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let base = sys::reg::string(r"HKLM\SOFTWARE\Wow6432Node\Oculus VR, LLC\Oculus", "Base").ok_or("Meta's runtime isn't installed")?;
+        let cli = std::path::PathBuf::from(base).join("Support").join("oculus-diagnostics").join("OculusDebugToolCLI.exe");
+        if !cli.exists() {
+            return Err("Meta's Debug Tool isn't installed".into());
+        }
+        let asw = match t.asw.as_str() {
+            "off" => "Off",
+            "45" => "Clock45",
+            "30" => "Clock30",
+            "18" => "Clock18",
+            _ => "Auto",
+        };
+        let script = [
+            format!("service set-pixels-per-display-pixel-override {:.2}", t.supersampling),
+            format!("server: asw.{asw}"),
+            format!("service set-client-fov-tan-angle-multiplier {:.2} {:.2}", t.fov_x, t.fov_y),
+            format!("perfhud set-mode {}", t.perf_hud.clamp(0, 6)),
+            format!("service enable-adaptive-gpu-perf-scale {}", t.adaptive_gpu),
+            format!("service set-force-mip-gen-on-all-layers {}", t.mipmaps_all_layers),
+            format!("service set-use-fov-stencil {}", t.fov_stencil),
+            format!("server: Touch.DisableSleep {}", t.touch_never_sleep),
+            "exit".to_string(),
+        ]
+        .join("\n");
+        let file = sys::data_dir().join("rift_tweaks.txt");
+        std::fs::write(&file, script).map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new(&cli);
+        cmd.arg("-f").arg(&file).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        sys::no_window(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("Couldn't run Meta's Debug Tool: {e}"))?;
+        // It quits after "exit"; don't wait forever if OVRServer doesn't answer.
+        for _ in 0..40 {
+            if child.try_wait().ok().flatten().is_some() {
+                sys::log("meta runtime: tweaks applied");
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let _ = child.kill();
+        Err("Meta's Debug Tool didn't finish".into())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = t;
+        Err("Meta's runtime is Windows only".into())
+    }
+}

@@ -7,6 +7,7 @@
 //! session on the Atrium Runtime ("home"), so the headset shows the dash as soon as it's on.
 use crate::services::runtime;
 use crate::sys;
+use crate::sys::settings::DashSettings;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
@@ -77,4 +78,43 @@ pub fn send(state: &serde_json::Value) {
 /// Ask the dash to start its home session again (Meta's runtime now hands it the headset).
 pub fn restart_home() {
     send(&serde_json::json!({ "type": "restartHome" }));
+}
+
+/// The dash's settings as the dash and the Atrium Runtime read them (%APPDATA%\Atrium\dash.json).
+pub fn write_settings(d: &DashSettings) {
+    let remap = d.remap.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
+    let text = format!(
+        "{{ \"distance\": {:.3}, \"width\": {:.3}, \"curve\": {:.3}, \"accent\": {}, \"environment\": {},\n  \"openButton\": \"{}\", \"openMode\": \"{}\", \"pauseGame\": \"{}\", \"remap\": \"{}\" }}\n",
+        d.distance,
+        d.width,
+        d.curve,
+        d.accent,
+        d.environment,
+        d.open_button,
+        if d.open_mode == "press" { "press" } else { "hold" },
+        if d.pause_game { "on" } else { "off" },
+        remap
+    );
+    let _ = std::fs::write(sys::data_dir().join("dash.json"), text);
+}
+
+/// The settings the dash last saved itself (before Atrium owned them), if any.
+pub fn read_settings_file() -> Option<DashSettings> {
+    let j = sys::read_json(&sys::data_dir().join("dash.json"))?;
+    let mut d = DashSettings::default();
+    let f = |k: &str, v: f32| j[k].as_f64().map(|x| x as f32).unwrap_or(v);
+    d.distance = f("distance", d.distance);
+    d.width = f("width", d.width);
+    d.curve = f("curve", d.curve);
+    d.accent = j["accent"].as_i64().unwrap_or(0) as i32;
+    d.environment = j["environment"].as_bool().unwrap_or(true);
+    d.open_button = j["openButton"].as_str().unwrap_or("left_menu").to_string();
+    d.open_mode = j["openMode"].as_str().unwrap_or("hold").to_string();
+    d.pause_game = j["pauseGame"].as_str() == Some("on");
+    for pair in j["remap"].as_str().unwrap_or("").split(',') {
+        if let Some((k, v)) = pair.split_once('=') {
+            d.remap.insert(k.to_string(), v.to_string());
+        }
+    }
+    Some(d)
 }

@@ -75,7 +75,14 @@ pub struct App {
 
 impl App {
     pub fn new(proxy: tao::event_loop::EventLoopProxy<UiEvent>) -> Arc<App> {
-        let app = Arc::new(App { state: Mutex::new(State { settings: Settings::load(), ..Default::default() }), proxy: Mutex::new(proxy) });
+        let mut settings = Settings::load();
+        // The dash's settings live here now; take over what the dash saved itself before.
+        if settings.dash.is_none() {
+            settings.dash = Some(dash::read_settings_file().unwrap_or_default());
+            settings.save();
+        }
+        dash::write_settings(settings.dash.as_ref().unwrap_or(&Default::default()));
+        let app = Arc::new(App { state: Mutex::new(State { settings, ..Default::default() }), proxy: Mutex::new(proxy) });
         app.watch_hardware();
         meta_runtime::watch();
         // The in-VR dashboard: its commands are the window's commands.
@@ -148,6 +155,9 @@ impl App {
             "downloadDir": set.download_dir,
             "versions": s.versions.iter().map(|(k, v)| (k.clone(), match v { Ok(b) => json!({ "builds": b }), Err(e) => json!({ "error": e }) })).collect::<serde_json::Map<_, _>>(),
             "downloads": s.downloads,
+            "dash": set.dash.clone().unwrap_or_default(),
+            "rift": set.rift,
+            "riftAvailable": meta_runtime::installed(),
             "mix": { "enabled": set.mix.enabled, "controllers": if set.mix.controllers.is_empty() { "cv1" } else { set.mix.controllers.as_str() }, "state": s.mix, "busy": s.mix_busy },
         })
     }
@@ -160,6 +170,8 @@ impl App {
     fn watch_hardware(self: &Arc<Self>) {
         let mut last_wired: Option<std::time::Instant> = None;
         let mut asked_dash_off = false;
+        // The Rift tweaks went to this OVRServer (they're lost when it restarts).
+        let mut tweaks_applied = false;
         self.spawn(move |app| loop {
             let hw = headsets::detect();
             let (mix_on, touch) = {
@@ -209,6 +221,18 @@ impl App {
                     Ok(()) => dash::restart_home(),
                     Err(e) => app.notice(e),
                 }
+            }
+            // Rift tweaks (Settings): sent once OVRServer has the headset, again after each restart.
+            if !meta_runtime::running() {
+                tweaks_applied = false;
+            } else if !tweaks_applied && !mix_on && hw.meta.as_ref().is_some_and(|m| m.hmd_present) {
+                tweaks_applied = true;
+                let tweaks = app.st().settings.rift.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = meta_runtime::apply_tweaks(&tweaks) {
+                        sys::log(&e);
+                    }
+                });
             }
             // Linux: the Atrium Runtime's own service drives any connected headset.
             if cfg!(target_os = "linux") && !hw.headsets.is_empty() && atrium_service::available() && !atrium_service::running() {
@@ -520,6 +544,37 @@ impl App {
                 }
             }),
             "dashClosed" => {}
+            // Dash look and controls, from the window or the dash itself: one copy, here.
+            "setDash" => {
+                let Ok(d) = serde_json::from_value::<crate::sys::settings::DashSettings>(m["dash"].clone()) else { return };
+                {
+                    let mut s = self.st();
+                    if s.settings.dash.as_ref() == Some(&d) {
+                        return;
+                    }
+                    s.settings.dash = Some(d.clone());
+                    s.settings.save();
+                }
+                dash::write_settings(&d);
+                self.push();
+            }
+            // Rift tweaks: saved, and sent to OVRServer now if it's running.
+            "setRift" => {
+                let Ok(r) = serde_json::from_value::<crate::sys::settings::RiftTweaks>(m["rift"].clone()) else { return };
+                {
+                    let mut s = self.st();
+                    s.settings.rift = r.clone();
+                    s.settings.save();
+                }
+                self.push();
+                if meta_runtime::running() {
+                    self.spawn(move |app| {
+                        if let Err(e) = meta_runtime::apply_tweaks(&r) {
+                            app.notice(e);
+                        }
+                    });
+                }
+            }
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };
                 // One launch at a time, and never a second copy of a running game.

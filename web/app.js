@@ -485,7 +485,68 @@ function settings() {
         ${[['left', 'Left eye'], ['right', 'Right eye']].map(([v, l]) => `<option value="${v}" ${S.mirrorEye === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select>
     </div></div>
+    ${dashSettings()}
+    ${S.riftAvailable ? riftSettings() : ''}
   </div>`;
+}
+
+// ---- dash and Rift settings (the dash shows the same; Atrium keeps one copy) --------------
+const DASH_BUTTONS = [['left_menu', 'Menu'], ['x', 'X'], ['y', 'Y'], ['a', 'A'], ['b', 'B'], ['left_stick', 'Left stick'], ['right_stick', 'Right stick']];
+const ACCENTS = ['Aurora', 'Mint', 'Ember', 'Orchid', 'Gold'];
+const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('');
+const setRow = (title, sub, control) => `<div class="row"><div class="grow"><h4>${title}</h4><p>${sub}</p></div>${control}</div>`;
+const slider = (group, key, min, max, step, value, fmt) =>
+  `<span class="slide"><input type="range" data-${group}="${key}" data-kind="num" min="${min}" max="${max}" step="${step}" value="${value}"><b data-shows="${group}.${key}">${fmt(value)}</b></span>`;
+const pick = (group, key, kind, list, cur) => `<select class="input" data-${group}="${key}" data-kind="${kind}" style="width:220px">${opts(list, cur)}</select>`;
+
+function dashSettings() {
+  const d = S.dash || {};
+  const remap = d.remap || {};
+  return `<h2>Dash</h2><div class="card">
+    ${setRow('Distance', 'How far in front of you the dash floats.', slider('dash', 'distance', 0.6, 2.5, 0.05, d.distance, (v) => `${(+v).toFixed(2)} m`))}
+    ${setRow('Size', 'How wide the panel is.', slider('dash', 'width', 0.9, 3, 0.1, d.width, (v) => `${(+v).toFixed(1)} m`))}
+    ${setRow('Curve', 'Flat to strongly curved.', slider('dash', 'curve', 0, 1, 0.1, d.curve, (v) => `${Math.round(v * 100)}%`))}
+    ${setRow('Colour', 'The dash\'s accent colour.', pick('dash', 'accent', 'int', ACCENTS.map((n, i) => [i, n]), d.accent))}
+    ${setRow('Home surroundings', 'What\'s around you with no game running.', pick('dash', 'environment', 'bool', [[true, 'Space'], [false, 'Plain']], d.environment))}
+  </div>
+  <h2>Dash controls</h2><div class="card">
+    ${setRow('Dash button', 'The button that opens and closes the dash in games. The Oculus button works with Meta\'s runtime.', pick('dash', 'open_button', 'str', [...DASH_BUTTONS, ['oculus', 'Oculus button']], d.open_button))}
+    ${setRow('Open the dash by', 'Holding: a short press still reaches the game. Pressing: the game never sees that button.', pick('dash', 'open_mode', 'str', [['hold', 'Holding it'], ['press', 'Pressing it']], d.open_mode))}
+    ${setRow('Pause the game while the dash is open', 'Some games slow down while paused, which can make the dash stutter.', pick('dash', 'pause_game', 'bool', [[false, 'Keep running'], [true, 'Pause']], d.pause_game))}
+  </div>
+  <h2>Button remapping</h2><div class="card">
+    <p style="margin:0 0 10px">What games get when you press each button. Applies from the next game start.</p>
+    ${DASH_BUTTONS.map(([id, name]) => setRow(`${name}`, '', `<select class="input" data-remap="${id}" style="width:220px">${opts([[id, 'Same'], ...DASH_BUTTONS.filter(([b]) => b !== id)], remap[id] || id)}</select>`)).join('')}
+    <div class="row"><div class="grow"></div><button class="btn" id="remapreset">Reset all</button></div>
+  </div>`;
+}
+
+function riftSettings() {
+  const r = S.rift || {};
+  const ss = [[0, 'Game default'], ...[0.8, 1, 1.2, 1.4, 1.5, 1.6, 1.8, 2, 2.5].map((v) => [v, `${v.toFixed(1)}×`])];
+  return `<h2>Rift (Meta runtime)</h2><div class="card">
+    <p style="margin:0 0 10px">For wired Rift headsets. Atrium applies these to Meta's runtime now and every time it starts it.</p>
+    ${setRow('Supersampling', 'Renders games sharper at a GPU cost (pixels per display pixel).', pick('rift', 'supersampling', 'num', ss, r.supersampling))}
+    ${setRow('Asynchronous SpaceWarp', 'Auto lets Meta\'s runtime fill in frames when a game falls behind; locking holds the game at a lower rate.', pick('rift', 'asw', 'str', [['auto', 'Auto'], ['off', 'Off'], ['45', 'Locked 45 Hz'], ['30', 'Locked 30 Hz'], ['18', 'Locked 18 Hz']], r.asw))}
+    ${setRow('Field of view, horizontal', 'Lower renders less of the edges for more speed.', slider('rift', 'fov_x', 0.5, 1, 0.05, r.fov_x, (v) => `${Math.round(v * 100)}%`))}
+    ${setRow('Field of view, vertical', '', slider('rift', 'fov_y', 0.5, 1, 0.05, r.fov_y, (v) => `${Math.round(v * 100)}%`))}
+    ${setRow('Performance overlay', 'Meta\'s performance HUD inside the headset.', pick('rift', 'perf_hud', 'int', [[0, 'Off'], [1, 'Summary'], [2, 'Latency'], [3, 'App render'], [4, 'Compositor'], [5, 'ASW'], [6, 'Version']], r.perf_hud))}
+    ${setRow('Adaptive GPU performance scale', 'Lowers resolution when the GPU falls behind.', pick('rift', 'adaptive_gpu', 'bool', [[false, 'Off'], [true, 'On']], r.adaptive_gpu))}
+    ${setRow('Mipmaps on all layers', 'Smoother distant text on menus and overlays.', pick('rift', 'mipmaps_all_layers', 'bool', [[false, 'Off'], [true, 'On']], r.mipmaps_all_layers))}
+    ${setRow('FOV stencil', 'Skips pixels the lenses never show.', pick('rift', 'fov_stencil', 'bool', [[true, 'On'], [false, 'Off']], r.fov_stencil))}
+    ${setRow('Touch controllers never sleep', 'Keeps them awake between games; uses more battery.', pick('rift', 'touch_never_sleep', 'bool', [[false, 'Off'], [true, 'On']], r.touch_never_sleep))}
+  </div>`;
+}
+
+// A changed dash/Rift control: the whole group goes to Atrium.
+function settingChanged(el) {
+  const group = el.dataset.dash !== undefined ? 'dash' : 'rift';
+  const key = el.dataset[group];
+  const kind = el.dataset.kind;
+  const v = el.value;
+  const val = kind === 'num' ? parseFloat(v) : kind === 'int' ? parseInt(v, 10) : kind === 'bool' ? v === 'true' : v;
+  const obj = { ...(S[group] || {}), [key]: val };
+  if (group === 'dash') send('setDash', { dash: obj }); else send('setRift', { rift: obj });
 }
 
 // ---- render -------------------------------------------------------------------------------
@@ -495,7 +556,7 @@ function pageSig() {
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
     case 'mix': return JSON.stringify([S.mix, (S.hw?.headsets || []).map((h) => [h.name, h.via, h.active])]);
-    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir]);
+    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir, S.dash, S.rift, S.riftAvailable]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
 }
@@ -524,7 +585,7 @@ function go(page) { ui.page = page; if (page !== 'library') ui.selected = null; 
 
 // ---- events -------------------------------------------------------------------------------
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],[data-download],[data-cancel-dl],[data-remove-dl],[data-use-version],#vr,#autostart,#refresh,#savekey,#pickdl,#viewtoggle');
+  const t = e.target.closest('[data-page],[data-play],[data-game],[data-close],[data-cmd],[data-signin],[data-signout],[data-folder],[data-remove],[data-src],[data-url],[data-download],[data-cancel-dl],[data-remove-dl],[data-use-version],#vr,#autostart,#refresh,#savekey,#pickdl,#viewtoggle,#remapreset');
   if (!t) return;
   const d = t.dataset;
   if (d.url !== undefined) { e.preventDefault(); send('openUrl', { url: t.href }); }
@@ -550,6 +611,7 @@ document.addEventListener('click', (e) => {
   else if (t.id === 'autostart') send('setAutostart', { on: !S.autostart });
   else if (t.id === 'refresh') send('refresh');
   else if (t.id === 'pickdl') send('pickDownloadDir');
+  else if (t.id === 'remapreset') send('setDash', { dash: { ...S.dash, remap: {} } });
   else if (t.id === 'viewtoggle') {
     view.on = !view.on;
     t.classList.toggle('on', view.on);
@@ -561,6 +623,13 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('dblclick', (e) => { const g = e.target.closest('.game'); if (g) send('launch', { id: g.dataset.game }); });
 document.addEventListener('input', (e) => {
+  if (e.target.type === 'range' && e.target.dataset.kind === 'num') {
+    const group = e.target.dataset.dash !== undefined ? 'dash' : 'rift';
+    const key = e.target.dataset[group];
+    const b = document.querySelector(`[data-shows="${group}.${key}"]`);
+    const v = +e.target.value;
+    if (b) b.textContent = key === 'distance' ? `${v.toFixed(2)} m` : key === 'width' ? `${v.toFixed(1)} m` : `${Math.round(v * 100)}%`;
+  }
   if (e.target.id === 'q') { ui.search = e.target.value; render(); }
   if (e.target.id === 'viewgain') view.gain = Number(e.target.value);
 });
@@ -569,6 +638,13 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'version') { const g = S.games.find((x) => x.id === ui.selected); if (g) { ui.version[g.app_id] = e.target.value; render(); } }
   if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
   if (e.target.id === 'mirroreye') send('setMirrorEye', { value: e.target.value });
+  if (e.target.dataset && (e.target.dataset.dash !== undefined || e.target.dataset.rift !== undefined)) settingChanged(e.target);
+  if (e.target.dataset && e.target.dataset.remap !== undefined) {
+    const remap = { ...((S.dash || {}).remap || {}) };
+    const from = e.target.dataset.remap;
+    if (e.target.value === from) delete remap[from]; else remap[from] = e.target.value;
+    send('setDash', { dash: { ...S.dash, remap } });
+  }
   if (e.target.id === 'mixcontrollers') send('mixSet', { enabled: e.target.value === 'cv1' });
 });
 document.addEventListener('keydown', (e) => {

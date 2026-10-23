@@ -303,3 +303,9 @@ select.input { padding-right: 30px; cursor: pointer; }
 .views figure { margin: 0; }
 .views canvas { width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; background: #000; display: block; image-rendering: pixelated; }
 .views figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+
+/* Settings: sliders with their value */
+.slide { display: inline-flex; align-items: center; gap: 12px; }
+.slide input[type=range] { width: 200px; accent-color: var(--accent); }
+.slide b { min-width: 64px; text-align: right; font-weight: 600; color: var(--text); }
+.card .row + .row { margin-top: 14px; }
