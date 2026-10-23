@@ -8,7 +8,10 @@
 //   - The dash button (Controls tab: menu, X, Y, A, B or a stick click; held 0.45 s or pressed)
 //     opens or closes the dash. Held: a shorter press still reaches the game, once let go.
 //     Pressed: the game never sees that button.
-//   - Button remapping (Controls tab) rewrites the game's Touch bindings when it suggests them.
+//   - Button remapping (Controls tab): the game's bindings stay as they are; when it asks for a
+//     remapped button, it gets the state of the physical button(s) mapped to it, read through
+//     Atrium's own actions. (Moving bindings can't swap buttons on different hands that a game
+//     reads through one action, as Revive does for A/X and B/Y.)
 //   - While the dash is open the game loses input focus, as under Oculus Dash (it's told its
 //     session went VISIBLE, so it pauses, mutes and hides its hands), its actions aren't synced
 //     (it sees no input), and each
@@ -24,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
@@ -77,6 +81,10 @@ struct DashState
 	bool systemButton = true; // the runtime took a binding on the Oculus button
 	// The game's button actions and where they're bound (logged when they change: remap checks).
 	std::unordered_map<uint64_t, std::string> gameButtonPaths;
+	std::unordered_map<uint64_t, std::vector<int>> gameActionButtons; // game action -> kButtons it's on
+	int remapTo[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // physical button i gives the game button remapTo[i]
+	bool remapOn = false;
+	bool physical[8] = {}; // each button's state at the last sync (Atrium's own actions)
 	std::unordered_map<uint64_t, bool> loggedState;
 
 	// Controls tab (dash.json), re-read every second.
@@ -227,41 +235,6 @@ static void ReadControls()
 	d.pauseGame = d.shm->pauseGame != 0;
 }
 
-// Where a game's binding goes with the Controls tab's remapping ("x=y": pressing X, the game
-// gets Y). A game input on button B is pressed by every button remapped to B, and by B itself
-// unless B is remapped to something else. Empty: no button gives it any more.
-static std::vector<std::string> Physical(const std::string& path, const std::string& remap)
-{
-	std::vector<std::pair<const ButtonPath*, const ButtonPath*>> pairs;
-	for (size_t i = 0; i < remap.size();) {
-		size_t end = remap.find(',', i);
-		if (end == std::string::npos) end = remap.size();
-		std::string pair = remap.substr(i, end - i);
-		i = end + 1;
-		size_t eq = pair.find('=');
-		if (eq == std::string::npos) continue;
-		const ButtonPath *from = nullptr, *to = nullptr;
-		for (const ButtonPath& k : kButtons) {
-			if (pair.substr(0, eq) == k.id) from = &k;
-			if (pair.substr(eq + 1) == k.id) to = &k;
-		}
-		if (from && to && from != to) pairs.push_back({ from, to });
-	}
-	for (const ButtonPath& btn : kButtons) {
-		for (const char* suffix : { "/click", "/touch" }) {
-			if (path != std::string(btn.base) + suffix) continue;
-			std::vector<std::string> out;
-			bool moved = false;
-			for (auto& pr : pairs) moved = moved || pr.first == &btn;
-			if (!moved) out.push_back(path);
-			for (auto& pr : pairs)
-				if (pr.second == &btn && (strcmp(suffix, "/click") == 0 || pr.first->touch)) out.push_back(std::string(pr.first->base) + suffix);
-			return out;
-		}
-	}
-	return { path };
-}
-
 static bool TouchFamily(const char* profile) { return strstr(profile, "touch") != nullptr; }
 
 struct ProfilePaths { const char* profile; const char* trigger; const char* squeeze; const char* stick; const char* menu; };
@@ -312,25 +285,31 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 	EnsureActions(instance);
 	const ProfilePaths* p = b ? FindProfile(instance, b->interactionProfile) : nullptr;
 	if (!p || !g_dash.set || g_dash.attached) return next(instance, b);
-	// The game's Touch bindings, remapped as the Controls tab says.
-	std::vector<XrActionSuggestedBinding> all;
+	// The game's bindings, as they are (remapping happens when it reads them, see top).
+	std::vector<XrActionSuggestedBinding> all(b->suggestedBindings, b->suggestedBindings + b->countSuggestedBindings);
 	std::string remap = TouchFamily(p->profile) ? DashSetting(DashJson(), "remap") : std::string();
-	for (uint32_t i = 0; i < b->countSuggestedBindings; i++) {
-		XrActionSuggestedBinding sb = b->suggestedBindings[i];
-		if (!remap.empty()) {
-			char buf[XR_MAX_PATH_LENGTH];
-			uint32_t n = 0;
-			if (XR_SUCCEEDED(BK(instance, xrPathToString)(instance, sb.binding, sizeof buf, &n, buf))) {
-				for (const std::string& to : Physical(buf, remap)) {
-					XrActionSuggestedBinding moved = sb;
-					moved.binding = Path(instance, to.c_str());
-					all.push_back(moved);
-				}
-				continue;
+	if (!remap.empty()) {
+		for (size_t i = 0; i < remap.size();) {
+			size_t end = remap.find(',', i);
+			if (end == std::string::npos) end = remap.size();
+			std::string pair = remap.substr(i, end - i);
+			i = end + 1;
+			size_t eq = pair.find('=');
+			int from = -1, to = -1;
+			for (int k = 0; k < 7 && eq != std::string::npos; k++) {
+				if (pair.substr(0, eq) == kButtons[k].id) from = k;
+				if (pair.substr(eq + 1) == kButtons[k].id) to = k;
 			}
+			if (from >= 0 && to >= 0 && from != to) { g_dash.remapTo[from] = to; g_dash.remapOn = true; }
 		}
-		all.push_back(sb);
 	}
+	// Which buttons each game action is on (the remap and the dash button need it).
+	for (const XrActionSuggestedBinding& sb : all)
+		for (int k = 0; k < 7; k++)
+			if (sb.binding == Path(instance, (std::string(kButtons[k].base) + "/click").c_str())) {
+				std::vector<int>& v = g_dash.gameActionButtons[(uint64_t)sb.action];
+				if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
+			}
 	// Remember where the game's button actions are bound, for the log.
 	for (const XrActionSuggestedBinding& sb : all) {
 		char buf[XR_MAX_PATH_LENGTH];
@@ -367,7 +346,7 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSuggestInteractionProfileBindings(XrInstan
 		merged.countSuggestedBindings = (uint32_t)gameCount;
 		return next(instance, &merged);
 	}
-	if (!remap.empty()) AtriumLog("dash: %s remapped (%s)", p->profile, remap.c_str());
+	if (!remap.empty()) AtriumLog("dash: %s: remapping %s", p->profile, remap.c_str());
 	g_dash.suggested = true;
 	return r;
 }
@@ -444,6 +423,15 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrSyncActions(XrSession session, const XrAct
 	if (XR_FAILED(r)) return r;
 
 	ReadControls();
+	if (d.remapOn) {
+		for (int k = 0; k < 7; k++) {
+			XrActionStateGetInfo bi = { XR_TYPE_ACTION_STATE_GET_INFO };
+			bi.action = d.button[k];
+			XrActionStateBoolean s = { XR_TYPE_ACTION_STATE_BOOLEAN };
+			BK(d.instance, xrGetActionStateBoolean)(session, &bi, &s);
+			d.physical[k] = s.isActive && s.currentState;
+		}
+	}
 	XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO };
 	gi.action = d.button[d.openButton];
 	XrActionStateBoolean m = { XR_TYPE_ACTION_STATE_BOOLEAN };
@@ -478,6 +466,31 @@ XRAPI_ATTR XrResult XRAPI_CALL Dash_xrGetActionStateBoolean(XrSession session, c
 {
 	XrResult r = NextFn<PFN_xrGetActionStateBoolean>("xrGetActionStateBoolean")(session, info, state);
 	DashState& d = g_dash;
+	if (XR_SUCCEEDED(r) && info && d.remapOn && state->isActive && session == d.session) {
+		auto it = d.gameActionButtons.find((uint64_t)info->action);
+		if (it != d.gameActionButtons.end()) {
+			bool involved = false, pressed = false;
+			for (int game : it->second) {
+				// Only the buttons on the hand the game asks about.
+				bool left = strstr(kButtons[game].base, "/left/") != nullptr;
+				if (info->subactionPath != XR_NULL_PATH && info->subactionPath != d.hand[left ? 0 : 1]) continue;
+				bool remapped = d.remapTo[game] >= 0;
+				for (int k = 0; k < 7; k++) remapped = remapped || d.remapTo[k] == game;
+				if (!remapped) continue;
+				involved = true;
+				// Pressed by the buttons remapped to it, and by itself unless it's remapped away.
+				if (d.remapTo[game] < 0 && d.physical[game]) pressed = true;
+				for (int k = 0; k < 7; k++)
+					if (d.remapTo[k] == game && d.physical[k]) pressed = true;
+			}
+			if (involved) {
+				bool& last = d.reported[(uint64_t)info->action ^ ((uint64_t)info->subactionPath << 1)];
+				state->changedSinceLastSync = pressed != last;
+				state->currentState = pressed;
+				last = pressed;
+			}
+		}
+	}
 	if (XR_SUCCEEDED(r) && info) {
 		// Which button the game sees pressed (bindings after remapping), on each change.
 		auto it = d.gameButtonPaths.find((uint64_t)info->action);
