@@ -50,6 +50,24 @@ Build: `cargo build --release` (app), `native\build.bat` (MSVC: ovrprobe, SteamF
 
 ## History
 
+- 2026-10-23: **Atrium dash** (replaces the unstarted Unity `Dashboard/`). `native/atrium_dash`
+  (atrium-dash.exe, D3D11 + D2D, OpenXR loader built in) draws a 3D dash in stereo; the Atrium
+  app starts it (`src/services/dash.rs`: stdin = the window's snapshot + running/home, stdout =
+  the window's commands; restarted if it ends, so it can be swapped live). Home = its own
+  OpenXR session whenever a headset is connected and no game runs. In games, `atrium_xr`
+  `dash_overlay.cpp` (D3D11/D3D12) adds Atrium's actions, opens on the Controls tab's button
+  (hold/press), copies the latest of 3 shared picture slots into a projection layer.
+  Confirmed in Echo on the CV1: home, open over Echo, no stutter, Oculus button, remapping.
+  - Meta's runtime only hands the headset out when its Dash is off (`PreventDashLaunch`=1);
+    Meta's app turns it back on. Atrium now turns it off as soon as a wired Rift is in use.
+  - The Oculus button never reaches apps; the dash reads its presses from Meta's service log.
+  - Remapping is done when the game reads its button actions (not by moving bindings): Revive
+    reads A/X and B/Y through one action per pair, told apart by hand.
+  - Merged the other session's mix & match branch; the dash sits above the Touch swap.
+    Sensors were left on WinUSB by it (Meta saw 0 sensors): `sensordriver restore` gives them
+    back. Mix mode's tracking service isn't staged in `native\out\monado` on main yet.
+  - Open: Vulkan/OpenGL games get no dash; screenshots; desktop window pinning.
+
 - 2026-10-21: **Rift CV1 on Atrium's own runtime, Windows (route A: no Meta).** Monado patches
   0006 (Rift drivers build on Windows: `os_hid_win32.c`, prober HID, sensors via libusb+UsbDk,
   Ceres `constellation` vcpkg feature) and 0007 (Touch position tracking: the Touch's own
