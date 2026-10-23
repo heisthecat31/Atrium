@@ -32,6 +32,13 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 copy /y atrium_xr\build\out\atrium_xr.dll out\ >nul
 copy /y atrium_xr\build\out\atrium_openxr.json out\ >nul
 
+rem The dash (atrium_dash\): Atrium's in-VR dashboard, atrium-dash.exe (the OpenXR loader built in).
+cmake -S atrium_dash -B atrium_dash\build -A x64 >nul
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+cmake --build atrium_dash\build --config Release --parallel
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+copy /y atrium_dash\build\out\atrium-dash.exe out\ >nul
+
 rem Oculus SDK headers: a local copy in third_party\LibOVR, else the one CMake fetched above.
 set "OVR=third_party\LibOVR"
 if not exist "%OVR%\Include\OVR_CAPI.h" set "OVR=atrium_ovr\build\_deps\ovr_sdk-src\LibOVR"

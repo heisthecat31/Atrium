@@ -2,7 +2,7 @@
 //! after every change Rust pushes a full snapshot (`atrium.update(...)`) and the page redraws.
 //! Slow work (USB/Meta probing, Steam/Meta requests, sign-in, file dialogs) runs on threads.
 use crate::login;
-use crate::services::{headsets::{self, Hardware}, atrium_service, launcher, library::{self as lib, Game, Owned}, meta_download::{self as dl, Build, Progress}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
+use crate::services::{headsets::{self, Hardware}, atrium_service, dash, launcher, library::{self as lib, Game, Owned}, meta_download::{self as dl, Build, Progress}, meta_runtime, runtime::{self as rt, RuntimeState}, standalone};
 use crate::sys::{self, settings::{GameOptions, LocalGame, MetaInstall, MetaVersion, Settings}};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -51,6 +51,17 @@ struct State {
     versions: HashMap<String, Result<Vec<Build>, String>>,
     /// Meta downloads running now, by app id.
     downloads: HashMap<String, Progress>,
+    /// The game Atrium last started, while its process runs (the dash's Now Playing / Quit).
+    running: Option<Running>,
+}
+
+#[derive(Clone)]
+struct Running {
+    id: String,
+    name: String,
+    /// Its executable's file name, lower case (how it's found among processes).
+    exe: String,
+    start: &'static str,
 }
 
 pub struct App {
@@ -63,6 +74,13 @@ impl App {
         let app = Arc::new(App { state: Mutex::new(State { settings: Settings::load(), ..Default::default() }), proxy: Mutex::new(proxy) });
         app.watch_hardware();
         meta_runtime::watch();
+        // The in-VR dashboard: its commands are the window's commands.
+        if dash::available() {
+            let a = app.clone();
+            if let Err(e) = dash::start(move |line| a.command(&line)) {
+                sys::log(&e);
+            }
+        }
         app.rescan();
         app.refresh_owned();
         app
@@ -84,8 +102,18 @@ impl App {
 
     /// Send the page everything it draws from.
     pub fn push(&self) {
-        let snap = self.snapshot();
+        let mut snap = self.snapshot();
         self.script(format!("window.atrium && atrium.update({snap})"));
+        // The dash gets the same, plus what's running and whether to show home. The dash is always
+        // up while Atrium runs (user): home whenever a headset is connected and no game is
+        // running or starting, over the game otherwise.
+        let s = self.st();
+        let headset = s.hw.as_ref().is_some_and(|h| !h.headsets.is_empty() || h.meta.as_ref().is_some_and(|m| m.hmd_present));
+        let home = headset && s.running.is_none() && s.launching.is_none();
+        snap["running"] = s.running.as_ref().map(|r| json!({ "id": r.id, "name": r.name, "start": r.start })).unwrap_or(Value::Null);
+        snap["home"] = json!(home);
+        drop(s);
+        dash::send(&snap);
     }
 
     pub fn notice(&self, text: impl AsRef<str>) {
@@ -126,6 +154,7 @@ impl App {
 
     fn watch_hardware(self: &Arc<Self>) {
         let mut last_wired: Option<std::time::Instant> = None;
+        let mut asked_dash_off = false;
         self.spawn(move |app| loop {
             let hw = headsets::detect();
             let mut st = rt::state(&hw);
@@ -147,6 +176,15 @@ impl App {
                     sys::log(&e);
                 }
             }
+            // ...with Meta's Dash off, so the headset goes to Atrium's dash (home) too. Asked once
+            // per run: if Windows says no, games still ask again when they start.
+            if meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::dash_off() && !asked_dash_off {
+                asked_dash_off = true;
+                match meta_runtime::turn_dash_off() {
+                    Ok(()) => dash::restart_home(),
+                    Err(e) => app.notice(e),
+                }
+            }
             // Linux: the Atrium Runtime's own service drives any connected headset.
             if cfg!(target_os = "linux") && !hw.headsets.is_empty() && atrium_service::available() && !atrium_service::running() {
                 if let Err(e) = atrium_service::start() {
@@ -157,6 +195,10 @@ impl App {
                 let mut s = app.st();
                 s.hw = Some(hw);
                 s.rt = Some(st);
+                // The game Atrium started has ended: the dash goes back to home.
+                if s.running.as_ref().is_some_and(|r| !sys::processes().contains(&r.exe)) {
+                    s.running = None;
+                }
             }
             app.push();
             std::thread::sleep(Duration::from_secs(5));
@@ -394,6 +436,33 @@ impl App {
                 _ => return,
             })),
             "refresh" => self.refresh_owned(),
+            // From the dash: close the running game (asked nicely, then ended after 5 s).
+            "quitGame" => {
+                let Some(r) = self.st().running.clone() else { return };
+                self.spawn(move |app| {
+                    let _ = sys::output("taskkill.exe", &["/IM", &r.exe]);
+                    for _ in 0..10 {
+                        std::thread::sleep(Duration::from_millis(500));
+                        if !sys::processes().contains(&r.exe) {
+                            break;
+                        }
+                    }
+                    if sys::processes().contains(&r.exe) {
+                        let _ = sys::output("taskkill.exe", &["/F", "/IM", &r.exe]);
+                    }
+                    app.st().running = None;
+                    app.notice(format!("Closed {}", r.name));
+                    app.push();
+                });
+            }
+            // From the dash: Reset view (Meta's runtime: its own recenter).
+            "recenter" => self.spawn(|app| {
+                let ok = sys::native_tool("ovrprobe.exe").is_some_and(|p| sys::output(p, &["recenter"]).contains("recenter: 0"));
+                if !ok {
+                    app.notice("Couldn't reset the view");
+                }
+            }),
+            "dashClosed" => {}
             "launch" => {
                 let Some(g) = self.game(&arg("id")) else { return };
                 // One launch at a time, and never a second copy of a running game.
@@ -441,6 +510,10 @@ impl App {
                     match r {
                         Ok(()) => {
                             app.notice(if g.installed { format!("Starting {}", g.name) } else { format!("Opening {} in its store", g.name) });
+                            if let (true, Some(exe)) = (g.installed, g.exe.as_ref().and_then(|p| p.file_name())) {
+                                let start = { let s = app.st(); launcher::mode(&g, &s.settings, s.rt.as_ref()).label() };
+                                app.st().running = Some(Running { id: g.id.clone(), name: g.name.clone(), exe: exe.to_string_lossy().to_lowercase(), start });
+                            }
                             app.rescan();
                         }
                         Err(e) => {

@@ -94,3 +94,32 @@ pub fn log(msg: &str) {
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
+
+/// Ties a child process to Atrium: Windows ends it when Atrium ends, however Atrium ends (a job
+/// object that lives as long as Atrium, closing its handle kills what's in it).
+pub fn end_with_atrium(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use std::sync::OnceLock;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        static JOB: OnceLock<usize> = OnceLock::new();
+        let job = *JOB.get_or_init(|| unsafe {
+            let j = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if !j.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(j, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);
+            }
+            j as usize
+        });
+        if job != 0 {
+            unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}

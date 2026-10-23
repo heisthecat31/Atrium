@@ -28,9 +28,9 @@ FetchContent_Declare(openxr_sdk
     SOURCE_SUBDIR _none)
 FetchContent_MakeAvailable(openxr_sdk)
 
-add_library(atrium_xr SHARED src/runtime.cpp)
+add_library(atrium_xr SHARED src/runtime.cpp src/dash_overlay.cpp)
 target_include_directories(atrium_xr PRIVATE ${openxr_sdk_SOURCE_DIR}/include)
 target_compile_definitions(atrium_xr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(atrium_xr PRIVATE /W3 /EHsc)
-target_link_libraries(atrium_xr PRIVATE shlwapi shell32 ole32)
+target_link_libraries(atrium_xr PRIVATE shlwapi shell32 ole32 d3d11 d3d12 dxgi)
 configure_file(atrium_openxr.json "${OUT_DIR}/atrium_openxr.json" COPYONLY)

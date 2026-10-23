@@ -88,7 +88,30 @@ pub fn watch() {
     });
 }
 
-fn dash_off() -> bool {
+/// Meta's Dash off, with Meta's own switch (admin, once each time Meta's app turns it back on).
+/// With it off, Meta's runtime gives the headset to whichever app asks: games, and Atrium's own
+/// dash. With it on, only Meta's Dash hands out the headset, and that's not running.
+pub fn turn_dash_off() -> Result<(), String> {
+    #[cfg(windows)]
+    if !dash_off() {
+        let inner = format!("reg add '{CONFIG}' /v PreventDashLaunch /t REG_DWORD /d 1 /f");
+        let ps = format!(
+            "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','{}'",
+            inner.replace('\'', "''")
+        );
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", &ps]);
+        sys::no_window(&mut cmd);
+        let st = cmd.status().map_err(|e| e.to_string())?;
+        if !st.success() || !dash_off() {
+            return Err("Windows didn't allow turning Meta's Dash off".into());
+        }
+        sys::log("meta runtime: Dash off");
+    }
+    Ok(())
+}
+
+pub fn dash_off() -> bool {
     #[cfg(windows)]
     return sys::reg::dword(CONFIG, "PreventDashLaunch") == Some(1);
     #[cfg(not(windows))]
@@ -115,21 +138,7 @@ pub fn prepare() -> Result<(), String> {
         if !installed() {
             return Err("Meta's runtime isn't installed".into());
         }
-        if !dash_off() {
-            let inner = format!("reg add '{CONFIG}' /v PreventDashLaunch /t REG_DWORD /d 1 /f");
-            let ps = format!(
-                "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','{}'",
-                inner.replace('\'', "''")
-            );
-            let mut cmd = std::process::Command::new("powershell.exe");
-            cmd.args(["-NoProfile", "-Command", &ps]);
-            sys::no_window(&mut cmd);
-            let st = cmd.status().map_err(|e| e.to_string())?;
-            if !st.success() {
-                return Err("Windows didn't allow turning Meta's Dash off".into());
-            }
-            sys::log("meta runtime: Dash off");
-        }
+        turn_dash_off()?;
         if !running() {
             start()?;
         }
@@ -150,32 +159,13 @@ pub fn prepare() -> Result<(), String> {
 /// lists it under Atrium), in a job that closes it when Atrium exits. No admin needed.
 #[cfg(windows)]
 pub fn start() -> Result<(), String> {
-    use std::os::windows::io::AsRawHandle;
-    use std::sync::OnceLock;
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-    // The job lives as long as Atrium; Windows closes its handle (and OVRServer) when Atrium ends.
-    static JOB: OnceLock<usize> = OnceLock::new();
-    let job = *JOB.get_or_init(|| unsafe {
-        let j = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if !j.is_null() {
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);
-        }
-        j as usize
-    });
     let base = sys::reg::string("HKLM\\SOFTWARE\\Wow6432Node\\Oculus VR, LLC\\Oculus", "Base").ok_or("Meta's runtime isn't installed")?;
     let dir = std::path::PathBuf::from(base).join("Support").join("oculus-runtime");
     let mut cmd = std::process::Command::new(dir.join("OVRServer_x64.exe"));
     cmd.current_dir(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     sys::no_window(&mut cmd);
     let child = cmd.spawn().map_err(|e| format!("Couldn't start Meta's runtime: {e}"))?;
-    if job != 0 {
-        unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
-    }
+    sys::end_with_atrium(&child);
     for _ in 0..20 {
         if running() {
             break;

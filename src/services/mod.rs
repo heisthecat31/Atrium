@@ -1,4 +1,5 @@
 pub mod atrium_service;
+pub mod dash;
 pub mod headsets;
 pub mod launcher;
 pub mod library;

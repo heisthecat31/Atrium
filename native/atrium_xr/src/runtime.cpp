@@ -204,6 +204,20 @@ template <typename F> static F Next(const char* name)
 	return it == g_next.end() ? nullptr : (F)it->second;
 }
 
+// For the dash overlay (dash_overlay.cpp): the backend's function behind a wrapper, the
+// backend's own lookup (for calls Atrium makes itself), and the log.
+PFN_xrVoidFunction AtriumNext(const char* name) { return Next<PFN_xrVoidFunction>(name); }
+PFN_xrGetInstanceProcAddr AtriumBackendGipa() { return g_backendGipa; }
+void AtriumLog(const char* fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	Log("%s", buf);
+}
+
 // ---- OVRPlugin games ------------------------------------------------------------------------
 // Unity/Unreal games built with Meta's OVRPlugin create their instance as "Oculus VR Plugin
 // (...)". Two things trip it on runtimes other than Meta's own:
@@ -333,12 +347,21 @@ static std::string SpaceDesc(XrSpace s)
 	return it == g_spaces.end() ? "action/unknown space" : it->second;
 }
 
+#include "dash_overlay.h"
+
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateSession(XrInstance instance, const XrSessionCreateInfo* info, XrSession* session)
 {
 	XrResult r = Next<PFN_xrCreateSession>("xrCreateSession")(instance, info, session);
 	const XrBaseInStructure* b = (const XrBaseInStructure*)info->next;
 	Log("xrCreateSession (%s): %s", b ? TypeName(b->type) : "no graphics binding", ResultName(r));
+	if (XR_SUCCEEDED(r)) DashSessionCreated(instance, info, *session);
 	return r;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrDestroySession(XrSession session)
+{
+	DashSessionDestroying(session);
+	return Next<PFN_xrDestroySession>("xrDestroySession")(session);
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrCreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* info, XrSpace* space)
@@ -400,7 +423,17 @@ static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrWaitFrame(XrSession session, cons
 
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrEndFrame(XrSession session, const XrFrameEndInfo* info)
 {
+	// The dash, when it's open, goes on top of the game's own layers.
+	std::vector<const XrCompositionLayerBaseHeader*> layers;
+	XrFrameEndInfo withDash;
+	if (info && DashEndFrame(session, info, layers)) {
+		withDash = *info;
+		withDash.layerCount = (uint32_t)layers.size();
+		withDash.layers = layers.data();
+		info = &withDash;
+	}
 	XrResult r = Next<PFN_xrEndFrame>("xrEndFrame")(session, info);
+	if (!g_trace) return r;
 	if (EverySecond(g_lastEnd)) {
 		Log("xrEndFrame: display %lld, blend %d, %u layers: %s", (long long)info->displayTime, (int)info->environmentBlendMode,
 			info->layerCount, ResultName(r));
@@ -436,13 +469,19 @@ static const Wrap g_wraps[] = {
 	{ "xrGetInstanceProperties", (PFN_xrVoidFunction)Atrium_xrGetInstanceProperties, When::Always },
 	{ "xrLocateSpace", (PFN_xrVoidFunction)Atrium_xrLocateSpace, When::OvrPlugin },
 	{ "xrLocateViews", (PFN_xrVoidFunction)Atrium_xrLocateViews, When::OvrPlugin },
-	{ "xrCreateSession", (PFN_xrVoidFunction)Atrium_xrCreateSession, When::Trace },
+	{ "xrCreateSession", (PFN_xrVoidFunction)Atrium_xrCreateSession, When::Always },
+	{ "xrDestroySession", (PFN_xrVoidFunction)Atrium_xrDestroySession, When::Always },
+	{ "xrSuggestInteractionProfileBindings", (PFN_xrVoidFunction)Dash_xrSuggestInteractionProfileBindings, When::Always },
+	{ "xrAttachSessionActionSets", (PFN_xrVoidFunction)Dash_xrAttachSessionActionSets, When::Always },
+	{ "xrSyncActions", (PFN_xrVoidFunction)Dash_xrSyncActions, When::Always },
+	{ "xrPollEvent", (PFN_xrVoidFunction)Dash_xrPollEvent, When::Always },
+	{ "xrGetActionStateBoolean", (PFN_xrVoidFunction)Dash_xrGetActionStateBoolean, When::Always },
 	{ "xrCreateReferenceSpace", (PFN_xrVoidFunction)Atrium_xrCreateReferenceSpace, When::Trace },
 	{ "xrCreateSwapchain", (PFN_xrVoidFunction)Atrium_xrCreateSwapchain, When::Trace },
 	{ "xrAcquireSwapchainImage", (PFN_xrVoidFunction)Atrium_xrAcquireSwapchainImage, When::Trace },
 	{ "xrReleaseSwapchainImage", (PFN_xrVoidFunction)Atrium_xrReleaseSwapchainImage, When::Trace },
 	{ "xrWaitFrame", (PFN_xrVoidFunction)Atrium_xrWaitFrame, When::Trace },
-	{ "xrEndFrame", (PFN_xrVoidFunction)Atrium_xrEndFrame, When::Trace },
+	{ "xrEndFrame", (PFN_xrVoidFunction)Atrium_xrEndFrame, When::Always },
 };
 
 static XRAPI_ATTR XrResult XRAPI_CALL Atrium_xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function)

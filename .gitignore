@@ -23,3 +23,6 @@ Thumbs.db
 /native/atrium_client/build/
 /native/atrium_monado/build/
 /native/atrium_openvr/build/
+/native/atrium_dash/build/
+/native/atrium_dash/*.log
+/native/atrium_xr/build/

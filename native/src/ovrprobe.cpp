@@ -31,6 +31,13 @@ int main(int argc, char** argv) {
     if (OVR_FAILURE(r)) { ovrErrorInfo e; ovr_GetLastErrorInfo(&e); printf("ovr_Create failed %d %s\n", r, e.ErrorString); return 1; }
 
     ovrHmdDesc d = ovr_GetHmdDesc(s);
+    if (argc > 1 && !strcmp(argv[1], "recenter")) {  // the dash's Reset view, on Meta's runtime
+        r = ovr_RecenterTrackingOrigin(s);
+        printf("recenter: %d\n", r);
+        ovr_Destroy(s);
+        ovr_Shutdown();
+        return OVR_SUCCESS(r) ? 0 : 1;
+    }
     if (argc > 1 && !strcmp(argv[1], "json")) {  // one line for Atrium
         unsigned int c = ovr_GetConnectedControllerTypes(s);
         ovrSessionStatus st = {};
