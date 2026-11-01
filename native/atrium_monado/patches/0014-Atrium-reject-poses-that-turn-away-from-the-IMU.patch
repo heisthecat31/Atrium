@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 18:50:00 +0000
+Subject: [PATCH] Atrium: reject poses that turn away from the device's IMU
+
+The tracker only checked a pose against the device's own orientation while it
+had a fresh position prior; once a Touch was lost a moment, a full search
+could take one Touch for the other (they mirror each other) or a Touch for the
+headset, and the hands jumped (the room view showed the headset where a Touch
+was). Now every pose found for a device is checked against its tracking
+source's orientation (its IMU) turned into the world by a learned rotation; a
+pose more than 25 degrees off is left out. The rotation is learned from the
+first 20 poses and kept following; after 90 rejected in a row it's learned
+again. The Touch now gives its orientation as the prior even without a fresh
+position (0013).
+---
+diff --git a/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp b/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
+--- a/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
++++ b/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
+@@ -377,6 +377,15 @@
+ 	struct
+ 	{
+ 		std::optional<DeviceLastPose> last_known_pose;
++
++		/*!
++		 * Atrium: the device's own orientation (its tracking source, from its IMU) turned into the world, learned
++		 * from the poses found for it. A pose that turns far from it is another device taken for this one (the
++		 * Touches mirror each other; a Touch's LEDs can fit the headset).
++		 */
++		xrt_quat Twi_orientation{0, 0, 0, 1};
++		uint32_t orientation_samples{0};
++		uint32_t orientation_rejects{0};
+ 	} locked_data;
+ 	// clang-format on
+ 
+diff --git a/src/xrt/tracking/constellation/t_constellation_tracker.cpp b/src/xrt/tracking/constellation/t_constellation_tracker.cpp
+--- a/src/xrt/tracking/constellation/t_constellation_tracker.cpp
++++ b/src/xrt/tracking/constellation/t_constellation_tracker.cpp
+@@ -694,6 +694,70 @@
+ 	return need_slow_search;
+ }
+ 
++/*
++ * Atrium: the device's own orientation as a check on each pose found for it. The tracking source's orientation (IMU
++ * fusion, its own frame) times a learned turn should match the pose; the turn is learned from the first poses and
++ * kept following. A pose more than kOrientationGateDeg off is another device's LEDs. If none agree for
++ * kOrientationRelearn poses in a row, the turn was learned wrong (or the fusion reset): learn it again.
++ */
++static constexpr float kOrientationGateDeg = 25.0f;
++static constexpr uint32_t kOrientationLearn = 20, kOrientationRelearn = 90;
++
++static float
++orientation_angle(const xrt_quat &a, const xrt_quat &b)
++{
++	float d = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
++	return 2.0f * acosf(fminf(1.0f, d));
++}
++
++static bool
++orientationAgrees(std::unique_ptr<Device> &device, timepoint_ns when_ns, const xrt_quat &Twd_orientation)
++{
++	if (device->params.tracking_source == nullptr) {
++		return true;
++	}
++	xrt_space_relation source = XRT_SPACE_RELATION_ZERO;
++	t_constellation_tracker_tracking_source_get_tracked_pose(device->params.tracking_source, when_ns, &source);
++	if ((source.relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0) {
++		return true;
++	}
++
++	// The turn that takes the source's orientation onto this pose's.
++	xrt_quat source_inverse, target;
++	math_quat_invert(&source.pose.orientation, &source_inverse);
++	math_quat_rotate(&Twd_orientation, &source_inverse, &target);
++	math_quat_normalize(&target);
++
++	std::unique_lock<os::Mutex> lock(device->data_lock);
++	auto &d = device->locked_data;
++	if (d.orientation_samples < kOrientationLearn) {
++		if (d.orientation_samples == 0) {
++			d.Twi_orientation = target;
++		} else {
++			xrt_quat blended;
++			math_quat_slerp(&d.Twi_orientation, &target, 0.2f, &blended);
++			math_quat_normalize(&blended);
++			d.Twi_orientation = blended;
++		}
++		d.orientation_samples++;
++		return true;
++	}
++
++	if (orientation_angle(d.Twi_orientation, target) > kOrientationGateDeg * 3.14159265f / 180.0f) {
++		if (++d.orientation_rejects >= kOrientationRelearn) {
++			d.orientation_samples = 0;
++			d.orientation_rejects = 0;
++		}
++		return false;
++	}
++	d.orientation_rejects = 0;
++	xrt_quat blended;
++	math_quat_slerp(&d.Twi_orientation, &target, 0.02f, &blended);
++	math_quat_normalize(&blended);
++	d.Twi_orientation = blended;
++	return true;
++}
++
+ void
+ Camera::pushPose(CameraSample &camera_sample,
+                  DeviceState &device_state,
+@@ -839,6 +903,14 @@
+ 	if (Txr_world_cam.has_value()) {
+ 		math_pose_transform(&Txr_world_cam.value(), &Txr_cam_device, &Txr_world_device.value());
+ 
++		// Atrium: is it really this device? Its IMU says which way it faces; a pose far from that is another
++		// device's LEDs (the Touches mirror each other, a Touch can fit the headset's model): leave it out.
++		if (!orientationAgrees(device, camera_sample.timestamp_ns, Txr_world_device->orientation)) {
++			CT_DEBUG(tracker, "Pose for device %d turned away from its IMU: another device's LEDs, left out",
++			         device->id);
++			return;
++		}
++
+ 		// Compute the metrics
+ 		t_constellation_tracker_sample_metrics metrics = {
+ 		    .matched_blob_count = score.matched_blobs,

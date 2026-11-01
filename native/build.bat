@@ -39,6 +39,14 @@ cmake --build atrium_dash\build --config Release --parallel
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 copy /y atrium_dash\build\out\atrium-dash.exe out\ >nul
 
+rem TouchLink (touchlink\): Rift CV1 Touches as SteamVR controllers with any headset (a separate
+rem tool; Atrium can use it, it doesn't need Atrium). out\touchlink\touchlink.exe + the driver folder.
+cmake -S touchlink -B touchlink\build -A x64 >nul
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+cmake --build touchlink\build --config Release --target driver_touchlink touchlink sensordriver --parallel
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+xcopy /y /e /i /q touchlink\build\out out\touchlink >nul
+
 rem Oculus SDK headers: a local copy in third_party\LibOVR, else the one CMake fetched above.
 set "OVR=third_party\LibOVR"
 if not exist "%OVR%\Include\OVR_CAPI.h" set "OVR=atrium_ovr\build\_deps\ovr_sdk-src\LibOVR"

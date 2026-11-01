@@ -1,0 +1,835 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 18:00:00 +0000
+Subject: [PATCH] Atrium: room calibration for more than one Rift sensor
+
+Upstream put every sensor at the same placeholder pose, so with two sensors
+each saw a device somewhere else and poses snapped between them. Now the
+first sensor is the reference and every other one is placed as Meta's runtime
+does it: from where a device (a Touch, the headset) is in moments both it and
+a placed sensor see it. Each moment is a point pair (the device in this
+sensor's frame, and in the origin as the placed sensor puts it); the sensor's
+pose is the rigid fit of the two clouds (Horn), found among outliers with
+RANSAC, refined on the agreeing points, and kept refined as more come in.
+Until placed, a sensor's poses aren't used. Saved by sensor serial in
+<config>/Atrium/rift_room.json, loaded at start; the Atrium app shows it.
+---
+diff --git a/src/xrt/tracking/constellation/t_constellation_tracker.h b/src/xrt/tracking/constellation/t_constellation_tracker.h
+--- a/src/xrt/tracking/constellation/t_constellation_tracker.h
++++ b/src/xrt/tracking/constellation/t_constellation_tracker.h
+@@ -44,6 +44,13 @@
+ 	bool has_concrete_pose;
+ 
+ 	/*!
++	 * Atrium: room calibration. A camera without a concrete pose gets one from devices it sees at the same time
++	 * as a camera that has one; with this set, a camera that has one keeps it refined the same way (and moved if
++	 * the camera was moved). Leave it unset on the camera everything is measured from.
++	 */
++	bool refine_pose;
++
++	/*!
+ 	 * The blob sink for this camera, this is an out parameter filled in by the constellation tracker, and you are
+ 	 * expected to pass this to your blobwatch implementation.
+ 	 */
+@@ -112,6 +119,21 @@
+ 	enum t_constellation_tracker_flags flags;
+ 	struct t_constellation_tracker_camera_mosaic mosaics[XRT_CONSTELLATION_MAX_TRACKING_MOSAICS];
+ 	size_t num_mosaics;
++
++	/*!
++	 * Atrium: room calibration progress, called from tracker threads (keep it short). For each camera solved
++	 * from shared sightings: how many sightings it has, and its pose once solved (@p solved) or refined.
++	 */
++	void (*room_update)(void *userdata,
++	                    size_t mosaic_index,
++	                    size_t camera_index,
++	                    uint32_t sightings,
++	                    bool solved,
++	                    const struct xrt_pose *pose_in_origin);
++	void *room_userdata;
++
++	//! Atrium: every device pose a placed camera finds, in the origin (the room view shows them). Optional.
++	void (*device_seen)(void *userdata, uint32_t device_id, int64_t timestamp_ns, const struct xrt_pose *pose);
+ };
+ 
+ /*!
+diff --git a/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp b/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
+--- a/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
++++ b/src/xrt/tracking/constellation/t_constellation_tracker_internal.hpp
+@@ -250,6 +250,9 @@
+ 		bool has_concrete_pose;
+ 	} locked_data;
+ 
++	//! Atrium: this camera's pose comes from (or is refined by) the room calibration.
++	bool room_solved{false};
++
+ public: // Methods (t_constellation_tracker.cpp)
+ 	static Camera *
+ 	Get(t_blob_sink *tbs)
+@@ -446,6 +449,33 @@
+ 	std::unique_ptr<struct RerunContext> rerun_stream{};
+ #endif
+ 
++	/*!
++	 * Atrium: room calibration. Every good pose a camera finds is kept per (camera, device); when a camera to be
++	 * solved and a camera with a pose see the same device in the same frame (the mosaic's cameras are synced), the
++	 * device's position gives a point pair: where it is in the first camera's frame, and where the second camera puts
++	 * it in the origin. The camera's pose is the rigid fit of many such pairs (t_constellation_tracker.cpp).
++	 */
++	struct RoomSighting
++	{
++		timepoint_ns timestamp_ns{0};
++		xrt_pose Txr_cam_device{};
++	};
++	struct RoomPair
++	{
++		xrt_vec3 in_cam;
++		xrt_vec3 in_origin;
++	};
++	struct
++	{
++		std::mutex lock;
++		//! Latest sighting, [mosaic][camera][device].
++		std::vector<std::vector<std::vector<RoomSighting>>> latest;
++		//! Point pairs for each camera being solved, [mosaic][camera], the newest last.
++		std::vector<std::vector<std::vector<RoomPair>>> pairs;
++		//! New pairs for each camera since its last solve.
++		std::vector<std::vector<size_t>> solved_at;
++	} room;
++
+ public: // Methods
+ 	static ConstellationTracker *
+ 	Get(xrt_frame_node *node)
+@@ -479,6 +509,14 @@
+ 
+ 	void
+ 	removeDevice(t_constellation_device_id_t device_id);
++
++	//! Atrium: a good pose of @p device_id seen by @p camera, for the room calibration.
++	void
++	roomSighting(Camera &camera,
++	             size_t mosaic_index,
++	             t_constellation_device_id_t device_id,
++	             timepoint_ns timestamp_ns,
++	             const xrt_pose &Txr_cam_device);
+ };
+ 
+ }; // namespace xrt::tracking::constellation
+diff --git a/src/xrt/tracking/constellation/t_constellation_tracker.cpp b/src/xrt/tracking/constellation/t_constellation_tracker.cpp
+--- a/src/xrt/tracking/constellation/t_constellation_tracker.cpp
++++ b/src/xrt/tracking/constellation/t_constellation_tracker.cpp
+@@ -18,6 +18,9 @@
+ 
+ #include <string>
+ #include <cstring>
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
+ 
+ 
+ namespace xrt::tracking::constellation {
+@@ -193,6 +196,7 @@
+ 	    .Txr_origin_cam = camera_params.pose_in_origin,
+ 	    .has_concrete_pose = camera_params.has_concrete_pose,
+ 	};
++	this->room_solved = !camera_params.has_concrete_pose || camera_params.refine_pose;
+ 
+ 	this->slow_processing_thread_data.cs = correspondence_search_new(log_level_ptr, &this->model);
+ 	this->fast_processing_thread_data.cs = correspondence_search_new(log_level_ptr, &this->model);
+@@ -797,6 +801,12 @@
+ 	                      "Camera mosaic was destroyed while processing a sample, this should never happen since "
+ 	                      "the mosaic owns the camera");
+ 
++	// Atrium: good poses feed the room calibration (the cameras' poses from each other).
++	if (POSE_HAS_FLAGS(&score, POSE_MATCH_GOOD) && !POSE_HAS_FLAGS(&score, POSE_MATCH_DEGENERATE) &&
++	    score.matched_blobs >= 6) {
++		tracker->roomSighting(*this, mosaic->index, device->id, camera_sample.timestamp_ns, Txr_cam_device);
++	}
++
+ 	float average_brightness = 0.0f;
+ 	uint32_t used_blobs = 0;
+ 	for (uint32_t i = 0; i < camera_sample.blob_count; i++) {
+@@ -847,6 +857,10 @@
+ 		    .metrics = metrics,
+ 		};
+ 		t_constellation_tracker_device_push_sample(device->device, &sample);
++		if (tracker->params.device_seen) {
++			tracker->params.device_seen(tracker->params.room_userdata, (uint32_t)device->id,
++			                            camera_sample.timestamp_ns, &sample.pose);
++		}
+ 	}
+ 
+ 	{
+@@ -1026,6 +1040,15 @@
+ 
+ 	this->params = *params;
+ 
++	this->room.latest.resize(this->mosaics.size());
++	this->room.pairs.resize(this->mosaics.size());
++	this->room.solved_at.resize(this->mosaics.size());
++	for (size_t i = 0; i < this->mosaics.size(); i++) {
++		this->room.latest[i].resize(this->mosaics[i]->cameras.size());
++		this->room.pairs[i].resize(this->mosaics[i]->cameras.size());
++		this->room.solved_at[i].resize(this->mosaics[i]->cameras.size(), 0);
++	}
++
+ 	std::string data_recorder_output = debug_get_option_constellation_tracker_data_recorder_output();
+ 	if (!data_recorder_output.empty()) {
+ 		this->data_recorder = std::make_unique<DataRecorder>(this, data_recorder_output);
+@@ -1134,6 +1157,352 @@
+ 	this->devices.erase(this->devices.begin() + index);
+ }
+ 
++/*
++ *
++ * Atrium: room calibration
++ *
++ * As Meta's runtime does it: a camera is placed from where a device *is* (its position) in moments a placed camera
++ * sees it too, not from which way it faces. One pose's turn is a few degrees off, which a couple of metres away puts
++ * the camera tens of centimetres off; positions of a device moved around both cameras' view pin the camera down far
++ * better. Every pair is a point in the camera's frame and the same point in the origin; the camera's pose is the
++ * rigid fit of the two clouds (Horn), found among outliers with RANSAC and refined on the points that agree.
++ *
++ */
++
++//! Two cameras' sightings within this are the same frame (the mosaic's cameras fire together).
++static constexpr timepoint_ns kRoomSameFrameNs = 3 * U_TIME_1MS_IN_NS;
++//! Points before a camera is first solved, then how many new ones before it's solved again, and how many are kept.
++static constexpr size_t kRoomFirstSolve = 60, kRoomResolveEvery = 150, kRoomKeep = 600;
++//! A new point only counts this far from the camera's last one (a device lying still adds nothing).
++static constexpr float kRoomMinStepM = 0.03f;
++//! The points must span this much (bounding box diagonal) to pin the turn down.
++static constexpr float kRoomMinSpreadM = 0.5f;
++//! A point agrees with a fit within this.
++static constexpr float kRoomInlierM = 0.04f;
++//! A fit needs this many agreeing points, spanning this much.
++static constexpr size_t kRoomMinInliers = 30;
++static constexpr float kRoomMinInlierSpreadM = 0.4f;
++
++static float
++room_angle(const xrt_quat &a, const xrt_quat &b)
++{
++	float d = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
++	return 2.0f * acosf(fminf(1.0f, d));
++}
++
++//! Largest-eigenvalue eigenvector of a symmetric 4x4 (Jacobi).
++static void
++room_eigen4(double a[4][4], double out[4])
++{
++	double v[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
++	for (int sweep = 0; sweep < 50; sweep++) {
++		double off = 0;
++		for (int p = 0; p < 4; p++) {
++			for (int q = p + 1; q < 4; q++) {
++				off += a[p][q] * a[p][q];
++			}
++		}
++		if (off < 1e-18) {
++			break;
++		}
++		for (int p = 0; p < 4; p++) {
++			for (int q = p + 1; q < 4; q++) {
++				if (fabs(a[p][q]) < 1e-30) {
++					continue;
++				}
++				double theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
++				double t = (theta >= 0 ? 1 : -1) / (fabs(theta) + sqrt(theta * theta + 1));
++				double c = 1 / sqrt(t * t + 1), s = t * c;
++				for (int k = 0; k < 4; k++) {
++					double akp = a[k][p], akq = a[k][q];
++					a[k][p] = c * akp - s * akq;
++					a[k][q] = s * akp + c * akq;
++				}
++				for (int k = 0; k < 4; k++) {
++					double apk = a[p][k], aqk = a[q][k];
++					a[p][k] = c * apk - s * aqk;
++					a[q][k] = s * apk + c * aqk;
++				}
++				for (int k = 0; k < 4; k++) {
++					double vkp = v[k][p], vkq = v[k][q];
++					v[k][p] = c * vkp - s * vkq;
++					v[k][q] = s * vkp + c * vkq;
++				}
++			}
++		}
++	}
++	int best = 0;
++	for (int i = 1; i < 4; i++) {
++		if (a[i][i] > a[best][best]) {
++			best = i;
++		}
++	}
++	for (int k = 0; k < 4; k++) {
++		out[k] = v[k][best];
++	}
++}
++
++//! The rigid pose that takes the camera points onto the origin points (Horn), over the chosen pairs.
++static bool
++room_fit(const std::vector<ConstellationTracker::RoomPair> &pairs, const std::vector<size_t> &use, xrt_pose &out)
++{
++	if (use.size() < 3) {
++		return false;
++	}
++	double ca[3] = {0, 0, 0}, co[3] = {0, 0, 0};
++	for (size_t i : use) {
++		const xrt_vec3 &a = pairs[i].in_cam, &o = pairs[i].in_origin;
++		ca[0] += a.x, ca[1] += a.y, ca[2] += a.z;
++		co[0] += o.x, co[1] += o.y, co[2] += o.z;
++	}
++	for (int k = 0; k < 3; k++) {
++		ca[k] /= use.size();
++		co[k] /= use.size();
++	}
++	double S[3][3] = {};
++	for (size_t i : use) {
++		const xrt_vec3 &a = pairs[i].in_cam, &o = pairs[i].in_origin;
++		double av[3] = {a.x - ca[0], a.y - ca[1], a.z - ca[2]}, ov[3] = {o.x - co[0], o.y - co[1], o.z - co[2]};
++		for (int r = 0; r < 3; r++) {
++			for (int c = 0; c < 3; c++) {
++				S[r][c] += av[r] * ov[c];
++			}
++		}
++	}
++	double N[4][4] = {
++	    {S[0][0] + S[1][1] + S[2][2], S[1][2] - S[2][1], S[2][0] - S[0][2], S[0][1] - S[1][0]},
++	    {S[1][2] - S[2][1], S[0][0] - S[1][1] - S[2][2], S[0][1] + S[1][0], S[2][0] + S[0][2]},
++	    {S[2][0] - S[0][2], S[0][1] + S[1][0], -S[0][0] + S[1][1] - S[2][2], S[1][2] + S[2][1]},
++	    {S[0][1] - S[1][0], S[2][0] + S[0][2], S[1][2] + S[2][1], -S[0][0] - S[1][1] + S[2][2]},
++	};
++	double e[4];
++	room_eigen4(N, e);
++	double n = sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2] + e[3] * e[3]);
++	if (!(n > 0)) {
++		return false;
++	}
++	out.orientation = {(float)(e[1] / n), (float)(e[2] / n), (float)(e[3] / n), (float)(e[0] / n)};
++	xrt_vec3 c_cam = {(float)ca[0], (float)ca[1], (float)ca[2]}, turned;
++	math_quat_rotate_vec3(&out.orientation, &c_cam, &turned);
++	out.position = {(float)co[0] - turned.x, (float)co[1] - turned.y, (float)co[2] - turned.z};
++	return true;
++}
++
++static float
++room_error(const ConstellationTracker::RoomPair &p, const xrt_pose &pose)
++{
++	xrt_vec3 moved;
++	math_pose_transform_point(&pose, &p.in_cam, &moved);
++	return m_vec3_len(m_vec3_sub(moved, p.in_origin));
++}
++
++/*!
++ * The camera's pose from its pairs: RANSAC over three-point fits, then a fit on every point that agrees. False when
++ * the points don't span enough or too few agree. @p rms_m is the leftover error of the points that agree.
++ */
++static bool
++room_solve(const std::vector<ConstellationTracker::RoomPair> &pairs, xrt_pose &out, float &rms_m, char *why, size_t why_size)
++{
++	size_t n = pairs.size();
++	xrt_vec3 lo = pairs[0].in_cam, hi = pairs[0].in_cam;
++	for (const auto &p : pairs) {
++		lo = {fminf(lo.x, p.in_cam.x), fminf(lo.y, p.in_cam.y), fminf(lo.z, p.in_cam.z)};
++		hi = {fmaxf(hi.x, p.in_cam.x), fmaxf(hi.y, p.in_cam.y), fmaxf(hi.z, p.in_cam.z)};
++	}
++	float spread = m_vec3_len(m_vec3_sub(hi, lo));
++	if (spread < kRoomMinSpreadM) {
++		snprintf(why, why_size, "the points span %.2f m of %.2f", spread, kRoomMinSpreadM);
++		return false;
++	}
++
++	uint32_t seed = 12345;
++	auto next = [&seed](size_t below) {
++		seed = seed * 1664525u + 1013904223u;
++		return (size_t)((seed >> 8) % below);
++	};
++	std::vector<size_t> best_in;
++	for (int iter = 0; iter < 1000; iter++) {
++		std::vector<size_t> three = {next(n), next(n), next(n)};
++		if (three[0] == three[1] || three[1] == three[2] || three[0] == three[2]) {
++			continue;
++		}
++		// Three points close together or in a line don't fix a turn.
++		xrt_vec3 a = m_vec3_sub(pairs[three[1]].in_cam, pairs[three[0]].in_cam);
++		xrt_vec3 b = m_vec3_sub(pairs[three[2]].in_cam, pairs[three[0]].in_cam);
++		xrt_vec3 cross = {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
++		if (m_vec3_len(cross) < 0.02f) {
++			continue;
++		}
++		xrt_pose guess;
++		if (!room_fit(pairs, three, guess)) {
++			continue;
++		}
++		std::vector<size_t> in;
++		for (size_t i = 0; i < n; i++) {
++			if (room_error(pairs[i], guess) < kRoomInlierM) {
++				in.push_back(i);
++			}
++		}
++		if (in.size() > best_in.size()) {
++			best_in = in;
++		}
++	}
++	// Not "most points agree": many are bad (a Touch taken for the other one, which mirrors it, by a sensor with no
++	// prior). On real data (2026-11-01) 44 of 150 agreed within 7 mm and the rest scattered; what counts is a tight
++	// fit backed by enough points that span the space.
++	if (best_in.size() < kRoomMinInliers || best_in.size() < n / 5) {
++		snprintf(why, why_size, "only %zu of %zu points agree within %.0f cm (span %.2f m)", best_in.size(), n,
++		         kRoomInlierM * 100, spread);
++		return false;
++	}
++	{
++		xrt_vec3 ilo = pairs[best_in[0]].in_cam, ihi = ilo;
++		for (size_t i : best_in) {
++			const xrt_vec3 &p = pairs[i].in_cam;
++			ilo = {fminf(ilo.x, p.x), fminf(ilo.y, p.y), fminf(ilo.z, p.z)};
++			ihi = {fmaxf(ihi.x, p.x), fmaxf(ihi.y, p.y), fmaxf(ihi.z, p.z)};
++		}
++		float inlier_spread = m_vec3_len(m_vec3_sub(ihi, ilo));
++		if (inlier_spread < kRoomMinInlierSpreadM) {
++			snprintf(why, why_size, "the %zu points that agree span %.2f m of %.2f", best_in.size(), inlier_spread,
++			         kRoomMinInlierSpreadM);
++			return false;
++		}
++	}
++	// Refine on the points that agree, twice (the set can grow once the fit is better).
++	xrt_pose fit;
++	for (int round = 0; round < 2; round++) {
++		if (!room_fit(pairs, best_in, fit)) {
++			return false;
++		}
++		std::vector<size_t> in;
++		for (size_t i = 0; i < n; i++) {
++			if (room_error(pairs[i], fit) < kRoomInlierM) {
++				in.push_back(i);
++			}
++		}
++		if (in.size() < 3) {
++			return false;
++		}
++		best_in = in;
++	}
++	double sum = 0;
++	for (size_t i : best_in) {
++		float e = room_error(pairs[i], fit);
++		sum += e * e;
++	}
++	rms_m = (float)sqrt(sum / best_in.size());
++	out = fit;
++	return true;
++}
++
++void
++ConstellationTracker::roomSighting(Camera &camera,
++                                   size_t mosaic_index,
++                                   t_constellation_device_id_t device_id,
++                                   timepoint_ns timestamp_ns,
++                                   const xrt_pose &Txr_cam_device)
++{
++	std::shared_ptr<CameraMosaic> &mosaic = this->mosaics[mosaic_index];
++	std::lock_guard<std::mutex> lock(this->room.lock);
++
++	auto &latest = this->room.latest[mosaic_index];
++	for (auto &per_camera : latest) {
++		if (per_camera.size() <= (size_t)device_id) {
++			per_camera.resize((size_t)device_id + 1);
++		}
++	}
++	latest[camera.index][device_id] = RoomSighting{timestamp_ns, Txr_cam_device};
++
++	// Pair this sighting with the same frame from every other camera: a point for whichever of the two is being
++	// solved, placed in the origin by the other.
++	for (size_t other = 0; other < latest.size(); other++) {
++		const RoomSighting &s = latest[other][device_id];
++		if (other == camera.index || s.timestamp_ns == 0 ||
++		    std::llabs(s.timestamp_ns - timestamp_ns) > kRoomSameFrameNs) {
++			continue;
++		}
++		for (int dir = 0; dir < 2; dir++) {
++			Camera &solve = dir == 0 ? camera : *mosaic->cameras[other];
++			Camera &from = dir == 0 ? *mosaic->cameras[other] : camera;
++			const xrt_pose &Tsolve_device = dir == 0 ? Txr_cam_device : s.Txr_cam_device;
++			const xrt_pose &Tfrom_device = dir == 0 ? s.Txr_cam_device : Txr_cam_device;
++			if (!solve.room_solved) {
++				continue;
++			}
++			xrt_pose Torigin_from;
++			{
++				std::unique_lock<os::Mutex> l(from.processing_lock);
++				if (!from.locked_data.has_concrete_pose) {
++					continue;
++				}
++				Torigin_from = from.locked_data.Txr_origin_cam;
++			}
++			RoomPair pair;
++			pair.in_cam = Tsolve_device.position;
++			math_pose_transform_point(&Torigin_from, &Tfrom_device.position, &pair.in_origin);
++
++			auto &pairs = this->room.pairs[mosaic_index][solve.index];
++			if (!pairs.empty() && m_vec3_len(m_vec3_sub(pairs.back().in_cam, pair.in_cam)) < kRoomMinStepM) {
++				continue;
++			}
++			pairs.push_back(pair);
++			if (pairs.size() > kRoomKeep) {
++				pairs.erase(pairs.begin(), pairs.end() - kRoomKeep);
++			}
++
++			// New points since the last solve: the first after kRoomFirstSolve, then every kRoomResolveEvery.
++			size_t &since = this->room.solved_at[mosaic_index][solve.index];
++			since++;
++			bool due = pairs.size() >= kRoomFirstSolve && (since >= kRoomResolveEvery || pairs.size() == since);
++			xrt_pose pose;
++			float rms = 0;
++			bool solved = false;
++			char why[160] = "";
++			bool fits = due && room_solve(pairs, pose, rms, why, sizeof(why));
++			if (due && !fits && pairs.size() % 50 == 0) {
++				// Why it isn't placed yet, and the points themselves (rift_room_points.csv, next to the
++				// service's log or in the working directory) to look at.
++				CT_INFO(this, "Room: camera %zu not placed from %zu points: %s", solve.index, pairs.size(), why);
++				if (FILE *f = fopen("rift_room_points.csv", "w")) {
++					fprintf(f, "cam_x,cam_y,cam_z,origin_x,origin_y,origin_z\n");
++					for (const auto &p : pairs) {
++						fprintf(f, "%f,%f,%f,%f,%f,%f\n", p.in_cam.x, p.in_cam.y, p.in_cam.z, p.in_origin.x,
++						        p.in_origin.y, p.in_origin.z);
++					}
++					fclose(f);
++				}
++			}
++			if (fits) {
++				since = 0;
++				std::unique_lock<os::Mutex> l(solve.processing_lock);
++				const xrt_pose &old = solve.locked_data.Txr_origin_cam;
++				float moved = m_vec3_len(m_vec3_sub(pose.position, old.position));
++				if (!solve.locked_data.has_concrete_pose || moved > 0.003f ||
++				    room_angle(pose.orientation, old.orientation) > 0.3f * 3.14159265f / 180.0f) {
++					CT_INFO(this, "Room: camera %zu %s from %zu points, %.1f cm fit (%.1f cm from before)",
++					        solve.index, solve.locked_data.has_concrete_pose ? "refined" : "placed",
++					        pairs.size(), rms * 100, moved * 100);
++					solve.locked_data.Txr_origin_cam = pose;
++					solve.locked_data.has_concrete_pose = true;
++					solved = true;
++				}
++			}
++			if (this->params.room_update && (solved || pairs.size() % 5 == 0)) {
++				xrt_pose now;
++				bool has;
++				{
++					std::unique_lock<os::Mutex> l(solve.processing_lock);
++					now = solve.locked_data.Txr_origin_cam;
++					has = solve.locked_data.has_concrete_pose;
++				}
++				this->params.room_update(this->params.room_userdata, mosaic_index, solve.index,
++				                         (uint32_t)pairs.size(), has, &now);
++			}
++		}
++	}
++}
++
+ }; // namespace xrt::tracking::constellation
+ 
+ using namespace xrt::tracking::constellation;
+diff --git a/src/xrt/targets/common/target_builder_rift.c b/src/xrt/targets/common/target_builder_rift.c
+--- a/src/xrt/targets/common/target_builder_rift.c
++++ b/src/xrt/targets/common/target_builder_rift.c
+@@ -82,6 +82,215 @@
+ 	return (struct rift_builder *)xb;
+ }
+ 
++#ifdef XRT_BUILD_DRIVER_RIFT_SENSOR
++/*
++ *
++ * Atrium: room calibration. The first sensor is the reference; every other one gets its pose from the
++ * constellation tracker (devices both see at once) and keeps it refined. The poses are kept by sensor serial in
++ * <config>/Atrium/rift_room.json (Windows: %APPDATA%\Atrium), which the Atrium app shows, and loaded at start, so a
++ * room is solved once. A missing reference sensor means a new room: everything else is solved again.
++ *
++ */
++
++#include "os/os_threading.h"
++#include "util/u_time.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#ifdef _WIN32
++#include <direct.h>
++#else
++#include <sys/stat.h>
++#define _mkdir(path) mkdir(path, 0755)
++#endif
++
++//! A sensor's key in the room file: its USB serial ("sensor<n>" if it has none).
++static const char *
++rift_room_serial(struct rift_sensor *sensor, size_t n, char *buf, size_t size)
++{
++	const char *serial = rift_sensor_get_frame_server(sensor)->serial;
++	if (serial[0] == '\0') {
++		snprintf(buf, size, "sensor%zu", n);
++		return buf;
++	}
++	return serial;
++}
++
++struct rift_room_sensor
++{
++	char serial[32];
++	bool reference;
++	bool placed;
++	uint32_t sightings;
++	struct xrt_pose pose;
++};
++
++static struct
++{
++	struct os_mutex lock;
++	bool lock_ready;
++	char path[1024];
++	struct rift_room_sensor sensors[XRT_TRACKING_MAX_CAMS];
++	size_t count;
++} rift_room;
++
++static void
++rift_room_path(void)
++{
++	const char *base = getenv("APPDATA");
++	if (base != NULL && base[0] != '\0') {
++		snprintf(rift_room.path, sizeof(rift_room.path), "%s\\Atrium", base);
++		_mkdir(rift_room.path);
++		snprintf(rift_room.path, sizeof(rift_room.path), "%s\\Atrium\\rift_room.json", base);
++		return;
++	}
++	const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
++	if (xdg != NULL && xdg[0] != '\0') {
++		snprintf(rift_room.path, sizeof(rift_room.path), "%s/atrium/rift_room.json", xdg);
++	} else {
++		snprintf(rift_room.path, sizeof(rift_room.path), "%s/.config/atrium/rift_room.json", home ? home : ".");
++	}
++}
++
++//! The saved entry for @p serial (one sensor per line, as rift_room_write writes it), false if none.
++static bool
++rift_room_read(const char *serial, struct rift_room_sensor *out)
++{
++	FILE *f = fopen(rift_room.path, "r");
++	if (f == NULL) {
++		return false;
++	}
++	char line[512], key[48];
++	snprintf(key, sizeof(key), "\"serial\": \"%s\"", serial);
++	bool found = false;
++	while (!found && fgets(line, sizeof(line), f)) {
++		const char *pose = strstr(line, "\"pose\": [");
++		if (strstr(line, key) == NULL || pose == NULL) {
++			continue;
++		}
++		struct xrt_pose p;
++		if (sscanf(pose + 9, "%f, %f, %f, %f, %f, %f, %f", &p.position.x, &p.position.y, &p.position.z,
++		           &p.orientation.x, &p.orientation.y, &p.orientation.z, &p.orientation.w) != 7) {
++			continue;
++		}
++		snprintf(out->serial, sizeof(out->serial), "%s", serial);
++		out->reference = strstr(line, "\"reference\": true") != NULL;
++		out->placed = strstr(line, "\"placed\": true") != NULL;
++		out->pose = p;
++		found = true;
++	}
++	fclose(f);
++	return found;
++}
++
++//! Call with the lock held.
++static void
++rift_room_write(void)
++{
++	char tmp[1040];
++	snprintf(tmp, sizeof(tmp), "%s.tmp", rift_room.path);
++	FILE *f = fopen(tmp, "w");
++	if (f == NULL) {
++		return;
++	}
++	fprintf(f, "{\n  \"updated\": %lld,\n  \"sensors\": [\n", (long long)time(NULL));
++	for (size_t i = 0; i < rift_room.count; i++) {
++		const struct rift_room_sensor *s = &rift_room.sensors[i];
++		fprintf(f,
++		        "    {\"serial\": \"%s\", \"reference\": %s, \"placed\": %s, \"sightings\": %u, \"pose\": [%f, %f, "
++		        "%f, %f, %f, %f, %f]}%s\n",
++		        s->serial, s->reference ? "true" : "false", s->placed ? "true" : "false", s->sightings,
++		        s->pose.position.x, s->pose.position.y, s->pose.position.z, s->pose.orientation.x,
++		        s->pose.orientation.y, s->pose.orientation.z, s->pose.orientation.w,
++		        i + 1 < rift_room.count ? "," : "");
++	}
++	fprintf(f, "  ]\n}\n");
++	fclose(f);
++	remove(rift_room.path);
++	rename(tmp, rift_room.path);
++}
++
++static void
++rift_room_update(void *userdata,
++                 size_t mosaic_index,
++                 size_t camera_index,
++                 uint32_t sightings,
++                 bool solved,
++                 const struct xrt_pose *pose_in_origin)
++{
++	(void)userdata;
++	(void)mosaic_index;
++	if (camera_index >= rift_room.count) {
++		return;
++	}
++	os_mutex_lock(&rift_room.lock);
++	struct rift_room_sensor *s = &rift_room.sensors[camera_index];
++	s->sightings = sightings;
++	if (solved) {
++		s->placed = true;
++		s->pose = *pose_in_origin;
++	}
++	rift_room_write();
++	os_mutex_unlock(&rift_room.lock);
++}
++
++/*
++ * The devices the sensors see right now (the headset is the tracker's device 0, the Touches follow), written to
++ * rift_live.json next to rift_room.json about 10 times a second for the Atrium app's room view.
++ */
++#define RIFT_LIVE_DEVICES 8
++
++static struct
++{
++	struct xrt_vec3 position[RIFT_LIVE_DEVICES];
++	int64_t seen_ns[RIFT_LIVE_DEVICES];
++	int64_t written_ns;
++} rift_live;
++
++static void
++rift_live_seen(void *userdata, uint32_t device_id, int64_t timestamp_ns, const struct xrt_pose *pose)
++{
++	(void)userdata;
++	if (device_id >= RIFT_LIVE_DEVICES || !rift_room.lock_ready) {
++		return;
++	}
++	os_mutex_lock(&rift_room.lock);
++	rift_live.position[device_id] = pose->position;
++	rift_live.seen_ns[device_id] = timestamp_ns;
++	if (timestamp_ns - rift_live.written_ns >= 100 * U_TIME_1MS_IN_NS) {
++		rift_live.written_ns = timestamp_ns;
++		char path[1040], tmp[1050];
++		snprintf(path, sizeof(path), "%s", rift_room.path);
++		char *name = strstr(path, "rift_room.json");
++		if (name != NULL) {
++			strcpy(name, "rift_live.json");
++			snprintf(tmp, sizeof(tmp), "%s.tmp", path);
++			FILE *f = fopen(tmp, "w");
++			if (f != NULL) {
++				fprintf(f, "{\"devices\": [");
++				bool first = true;
++				for (uint32_t i = 0; i < RIFT_LIVE_DEVICES; i++) {
++					if (rift_live.seen_ns[i] == 0) {
++						continue;
++					}
++					fprintf(f, "%s{\"id\": %u, \"pos\": [%f, %f, %f], \"age_ms\": %lld}", first ? "" : ", ", i,
++					        rift_live.position[i].x, rift_live.position[i].y, rift_live.position[i].z,
++					        (long long)((timestamp_ns - rift_live.seen_ns[i]) / U_TIME_1MS_IN_NS));
++					first = false;
++				}
++				fprintf(f, "]}\n");
++				fclose(f);
++				remove(path);
++				rename(tmp, path);
++			}
++		}
++	}
++	os_mutex_unlock(&rift_room.lock);
++}
++#endif
++
+ /*
+  *
+  * Misc stuff.
+@@ -514,10 +723,36 @@
+ 		struct t_constellation_tracker_params constellation_tracker_params = {
+ 		    .flags = T_CONSTELLATION_TRACKER_FLAGS_NONE,
+ 		    .num_mosaics = 1,
++		    .room_update = rift_room_update,
++		    .device_seen = rift_live_seen,
+ 		};
+ 
+ 		struct t_constellation_tracker_camera_mosaic *mosaic = &constellation_tracker_params.mosaics[0];
+ 
++		// Atrium: room calibration. The saved room, if its reference sensor is still here.
++		if (!rift_room.lock_ready) {
++			os_mutex_init(&rift_room.lock);
++			rift_room.lock_ready = true;
++		}
++		rift_room_path();
++		rift_room.count = 0;
++		struct rift_room_sensor saved[XRT_TRACKING_MAX_CAMS] = {0};
++		bool have_saved[XRT_TRACKING_MAX_CAMS] = {0};
++		int reference = -1;
++		for (uint32_t i = 0, n = 0; i < sensor_count && n < XRT_TRACKING_MAX_CAMS; i++) {
++			if (rift_sensor_get_variant(rb->sensors[i]) != variant) {
++				continue;
++			}
++			char key[32];
++			const char *serial = rift_room_serial(rb->sensors[i], n, key, sizeof(key));
++			have_saved[n] = rift_room_read(serial, &saved[n]) && saved[n].placed;
++			if (have_saved[n] && saved[n].reference && reference < 0) {
++				reference = (int)n;
++			}
++			n++;
++		}
++		bool new_room = reference < 0;
++
+ 		for (uint32_t i = 0; i < sensor_count && i < XRT_TRACKING_MAX_CAMS; i++) {
+ 			struct rift_sensor *sensor = rb->sensors[i];
+ 
+@@ -529,18 +764,39 @@
+ 			struct t_camera_calibration calibration;
+ 			rift_sensor_get_calibration(sensor, &calibration);
+ 
++			size_t n = mosaic->num_cameras;
++			// The reference sensor faces Z+ (so the user faces Z-) at 1 m, as upstream's placeholder did for
++			// every sensor; the rest are placed from what they see together with it.
++			bool is_reference = new_room ? n == 0 : (int)n == reference;
++			bool known = is_reference || (!new_room && have_saved[n]);
++			struct xrt_pose pose = {.position = {.x = 0, .y = 1.0f, .z = 0},
++			                        .orientation = {.x = 0, .y = 1, .z = 0, .w = 0}};
++			if (known && !new_room) {
++				pose = saved[n].pose;
++			}
++
+ 			mosaic->cameras[mosaic->num_cameras++] = (struct t_constellation_tracker_camera){
+ 			    .calibration = calibration,
+-			    // HACK: set concrete pose of "facing Z+" until we have real room calibration
+-			    //       (Z+ so that user faces Z-)
+-			    .has_concrete_pose = true,
+-			    .pose_in_origin = {.position = {.x = 0, .y = 1.0f, .z = 0},
+-			                       .orientation = {.x = 0, .y = 1, .z = 0, .w = 0}},
++			    .has_concrete_pose = known,
++			    .pose_in_origin = pose,
++			    .refine_pose = !is_reference,
+ 			};
+ 
+-			RIFT_DEBUG(rb, "Rift sensor %u added to constellation tracker at index %zu", i,
+-			           mosaic->num_cameras - 1);
+-		}
++			struct rift_room_sensor *rs = &rift_room.sensors[rift_room.count++];
++			char key[32];
++			snprintf(rs->serial, sizeof(rs->serial), "%s", rift_room_serial(sensor, n, key, sizeof(key)));
++			rs->reference = is_reference;
++			rs->placed = known;
++			rs->sightings = 0;
++			rs->pose = pose;
++
++			U_LOG_IFL_I(rb->log_level, "Rift sensor %u (%s) added to constellation tracker at index %zu: %s", i, rs->serial,
++			          mosaic->num_cameras - 1,
++			          is_reference ? "reference" : known ? "placed from the saved room" : "to be placed");
++		}
++		os_mutex_lock(&rift_room.lock);
++		rift_room_write();
++		os_mutex_unlock(&rift_room.lock);
+ 
+ 		ret = t_constellation_tracker_create(xfctx, &constellation_tracker_params, &rb->constellation_tracker);
+ 		if (ret != 0) {

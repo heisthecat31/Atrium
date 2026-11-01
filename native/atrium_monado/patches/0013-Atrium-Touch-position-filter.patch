@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 18:40:00 +0000
+Subject: [PATCH] Atrium: a position filter for the Touch
+
+The Touch's position was the cameras' raw pose: it stepped a few dozen times
+a second and passed every noisy or wrong solve straight on, so the hands
+stuttered and jumped. Now, as Meta's runtime and Jan Schmidt's OpenHMD work
+do, the accelerometer (gravity learned from it, not assumed) carries the
+Touch between camera poses at IMU rate, and each camera pose, compared with
+where the filter had the Touch at its own time, corrects position and
+velocity (alpha-beta, 0.6 / 0.1). A pose more than 12 cm off is left out unless the next
+ones agree; without camera poses the accelerometer stops moving it after
+250 ms. The tracker's prior stays on the camera poses.
+---
+diff --git a/src/xrt/drivers/rift/rift_internal.h b/src/xrt/drivers/rift/rift_internal.h
+--- a/src/xrt/drivers/rift/rift_internal.h
++++ b/src/xrt/drivers/rift/rift_internal.h
+@@ -804,6 +804,31 @@
+ 		//! Locked by input.mutex: world-from-fusion rotation, valid after the first optical pose.
+ 		bool have_correction;
+ 		struct xrt_quat correction;
++
++		/*!
++		 * Locked by input.mutex. Atrium: the position filter (rift_radio.c). The accelerometer moves the Touch
++		 * between camera poses, each camera pose pulls position and velocity toward it, and one far off from
++		 * where the Touch can be is left out unless the next ones agree with it.
++		 */
++		struct rift_touch_filter
++		{
++			bool valid;
++			//! The state's time (the last IMU sample), position and velocity in the cameras' frame.
++			int64_t t_ns;
++			struct xrt_vec3 p, v;
++			//! Gravity as the accelerometer reads it in the IMU fusion's frame (learned, slowly).
++			struct xrt_vec3 g;
++			bool g_valid;
++			int64_t last_optical_ns;
++			uint32_t outliers;
++			//! The state's past positions, to compare a camera pose (which arrives late) at its own time.
++			struct
++			{
++				int64_t t_ns;
++				struct xrt_vec3 p;
++			} past[64];
++			uint32_t past_next;
++		} filter;
+ 	} tracking;
+ 
+ 	//! Locked by radio_state.thread
+diff --git a/src/xrt/drivers/rift/rift_radio.c b/src/xrt/drivers/rift/rift_radio.c
+--- a/src/xrt/drivers/rift/rift_radio.c
++++ b/src/xrt/drivers/rift/rift_radio.c
+@@ -54,6 +54,142 @@
+ //! Bad-looking optical poses in a row after which they're believed anyway (the Touch really moved).
+ #define RIFT_TOUCH_MAX_REJECTS 3
+ 
++/*
++ * Atrium: the position filter. Raw camera positions stepped the hand a few dozen times a second and passed every
++ * noisy or wrong solve straight on (stutter, jumps). As Meta's runtime and Jan Schmidt's OpenHMD work do, the
++ * accelerometer carries the Touch between camera poses at IMU rate, and each camera pose corrects position and
++ * velocity (an alpha-beta filter, a fixed-gain Kalman filter).
++ */
++
++//! How much of a camera pose's difference goes into position, and into velocity (per second of camera interval).
++#define RIFT_TOUCH_FILTER_ALPHA 0.6f
++#define RIFT_TOUCH_FILTER_BETA 0.1f
++//! A camera pose this far from where the filter has the Touch is a bad solve...
++#define RIFT_TOUCH_FILTER_GATE_M 0.12f
++//! ...unless this many in a row say so (then the Touch really is there: the filter jumps to it).
++#define RIFT_TOUCH_FILTER_MAX_OUTLIERS 4
++//! Without camera poses for this long, the accelerometer no longer moves the Touch (its drift would).
++#define RIFT_TOUCH_FILTER_COAST_NS (250 * U_TIME_1MS_IN_NS)
++//! Velocity fades with this time constant (accelerometer bias), and much faster while coasting.
++#define RIFT_TOUCH_FILTER_DAMP_S 1.0f
++#define RIFT_TOUCH_FILTER_COAST_DAMP_S 0.08f
++//! Gravity is learned over this long.
++#define RIFT_TOUCH_FILTER_GRAVITY_S 2.0f
++
++static void
++rift_touch_filter_remember(struct rift_touch_controller *controller)
++{
++	uint32_t i = controller->tracking.filter.past_next++ % ARRAY_SIZE(controller->tracking.filter.past);
++	controller->tracking.filter.past[i].t_ns = controller->tracking.filter.t_ns;
++	controller->tracking.filter.past[i].p = controller->tracking.filter.p;
++}
++
++/*!
++ * One IMU sample (input.mutex held): learn gravity, and move the Touch by its acceleration. @p accel is in the
++ * device's frame, @p orientation the IMU fusion's.
++ */
++static void
++rift_touch_filter_imu(struct rift_touch_controller *controller,
++                      int64_t timestamp_ns,
++                      const struct xrt_vec3 *accel,
++                      const struct xrt_quat *orientation)
++{
++	struct rift_touch_filter *f = &controller->tracking.filter;
++
++	struct xrt_vec3 a_fusion;
++	math_quat_rotate_vec3(orientation, accel, &a_fusion);
++	float dt = f->t_ns ? (float)time_ns_to_s(timestamp_ns - f->t_ns) : 0.0f;
++	if (dt < 0.0f) {
++		return;
++	}
++	if (dt > 0.05f) {
++		dt = 0.05f;
++	}
++
++	// Gravity as read in the fusion's frame: whatever the accelerometer reads on average (sign and bias included).
++	if (!f->g_valid) {
++		f->g = a_fusion;
++		f->g_valid = true;
++	} else {
++		float k = fminf(1.0f, dt / RIFT_TOUCH_FILTER_GRAVITY_S);
++		f->g = m_vec3_add(f->g, m_vec3_mul_scalar(m_vec3_sub(a_fusion, f->g), k));
++	}
++
++	if (!f->valid || !controller->tracking.have_correction) {
++		f->t_ns = timestamp_ns;
++		return;
++	}
++
++	bool coasting = timestamp_ns - f->last_optical_ns > RIFT_TOUCH_FILTER_COAST_NS;
++	struct xrt_vec3 a = {0, 0, 0};
++	if (!coasting) {
++		struct xrt_vec3 linear = m_vec3_sub(a_fusion, f->g);
++		math_quat_rotate_vec3(&controller->tracking.correction, &linear, &a);
++		// A hand doesn't accelerate past this; more is a knock or a bad sample.
++		float len = m_vec3_len(a);
++		if (len > 60.0f) {
++			a = m_vec3_mul_scalar(a, 60.0f / len);
++		}
++	}
++	f->p = m_vec3_add(f->p, m_vec3_add(m_vec3_mul_scalar(f->v, dt), m_vec3_mul_scalar(a, 0.5f * dt * dt)));
++	f->v = m_vec3_add(f->v, m_vec3_mul_scalar(a, dt));
++	f->v = m_vec3_mul_scalar(f->v, expf(-dt / (coasting ? RIFT_TOUCH_FILTER_COAST_DAMP_S : RIFT_TOUCH_FILTER_DAMP_S)));
++	f->t_ns = timestamp_ns;
++	rift_touch_filter_remember(controller);
++}
++
++//! One camera position (input.mutex held): correct the filter, or start it.
++static void
++rift_touch_filter_optical(struct rift_touch_controller *controller, int64_t timestamp_ns, const struct xrt_vec3 *z)
++{
++	struct rift_touch_filter *f = &controller->tracking.filter;
++
++	if (!f->valid || timestamp_ns - f->last_optical_ns > 1000 * U_TIME_1MS_IN_NS) {
++		// First pose, or the Touch was out of view a while: start from it.
++		f->valid = true;
++		f->p = *z;
++		f->v = (struct xrt_vec3){0, 0, 0};
++		f->outliers = 0;
++		f->last_optical_ns = timestamp_ns;
++		if (!f->t_ns) {
++			f->t_ns = timestamp_ns;
++		}
++		return;
++	}
++
++	// Where the filter had the Touch when the cameras saw it (they're tens of ms behind).
++	struct xrt_vec3 then = f->p;
++	int64_t best = INT64_MAX;
++	for (uint32_t i = 0; i < ARRAY_SIZE(f->past); i++) {
++		int64_t d = f->past[i].t_ns - timestamp_ns;
++		d = d < 0 ? -d : d;
++		if (f->past[i].t_ns != 0 && d < best) {
++			best = d;
++			then = f->past[i].p;
++		}
++	}
++	struct xrt_vec3 e = m_vec3_sub(*z, then);
++
++	if (m_vec3_len(e) > RIFT_TOUCH_FILTER_GATE_M) {
++		if (++f->outliers < RIFT_TOUCH_FILTER_MAX_OUTLIERS) {
++			return;
++		}
++		// They keep saying so: the Touch is there.
++		f->p = m_vec3_add(f->p, e);
++		f->v = (struct xrt_vec3){0, 0, 0};
++		f->outliers = 0;
++		f->last_optical_ns = timestamp_ns;
++		return;
++	}
++	f->outliers = 0;
++
++	float interval = (float)time_ns_to_s(timestamp_ns - f->last_optical_ns);
++	interval = fminf(fmaxf(interval, 0.008f), 0.1f);
++	f->p = m_vec3_add(f->p, m_vec3_mul_scalar(e, RIFT_TOUCH_FILTER_ALPHA));
++	f->v = m_vec3_add(f->v, m_vec3_mul_scalar(e, RIFT_TOUCH_FILTER_BETA / interval));
++	f->last_optical_ns = timestamp_ns;
++}
++
+ /*!
+  * The Touch pose: IMU rotation turned into the cameras' frame, with the cameras' position. Before the first optical
+  * pose this is the plain IMU rotation, as before Atrium added optical tracking.
+@@ -73,6 +209,7 @@
+ 	                                    &angular_velocity);
+ 	bool have_correction = controller->tracking.have_correction;
+ 	struct xrt_quat correction = controller->tracking.correction;
++	struct rift_touch_filter filter = controller->tracking.filter;
+ 	os_mutex_unlock(&controller->input.mutex);
+ 
+ 	if (ret != 0) {
+@@ -127,6 +264,15 @@
+ 			}
+ 
+ 			relation.pose.position = optical.pose.position;
++			// Atrium: the filtered position for the app (smooth between camera poses); the tracker's prior
++			// stays on the camera poses themselves.
++			if (!for_prior && filter.valid && filter.t_ns != 0) {
++				float ahead = (float)time_ns_to_s(at_timestamp_ns - filter.t_ns);
++				ahead = fminf(fmaxf(ahead, -0.05f), 0.05f);
++				relation.pose.position = m_vec3_add(filter.p, m_vec3_mul_scalar(filter.v, ahead));
++				relation.linear_velocity = filter.v;
++				relation.relation_flags |= XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT;
++			}
+ 			relation.relation_flags |= XRT_SPACE_RELATION_POSITION_VALID_BIT;
+ 
+ 			if (age_ns <= RIFT_TOUCH_OPTICAL_FRESH_NS) {
+@@ -135,9 +281,8 @@
+ 		}
+ 	}
+ 
+-	if (for_prior && (relation.relation_flags & XRT_SPACE_RELATION_POSITION_VALID_BIT) == 0) {
+-		return false;
+-	}
++	// Without a fresh position the prior is the orientation alone: the tracker doesn't search from it, but checks
++	// each pose it finds against it (a Touch taken for the other one turns the wrong way).
+ 
+ 	*out_relation = relation;
+ 	return true;
+@@ -200,6 +345,7 @@
+ 		math_quat_normalize(&blended);
+ 		controller->tracking.correction = blended;
+ 	}
++	rift_touch_filter_optical(controller, sample->timestamp_ns, &sample->pose.position);
+ 	os_mutex_unlock(&controller->input.mutex);
+ }
+ 
+@@ -1213,6 +1359,8 @@
+ 	                              &imu_relation.pose.orientation, &imu_relation.angular_velocity) == 0) {
+ 		imu_relation.relation_flags = XRT_SPACE_RELATION_ORIENTATION_VALID_BIT;
+ 		m_relation_history_push(controller->tracking.imu_hist, &imu_relation, imu_sample.timestamp_ns);
++		// Atrium: the accelerometer moves the position filter between camera poses.
++		rift_touch_filter_imu(controller, imu_sample.timestamp_ns, &accel, &imu_relation.pose.orientation);
+ 	}
+ 
+ 	os_mutex_unlock(&controller->input.mutex);

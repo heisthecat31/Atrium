@@ -89,6 +89,10 @@ static Json g_state;
 static std::atomic<int> g_stateSeq{ 0 };
 static std::atomic<bool> g_quit{ false };
 static std::atomic<bool> g_restartHome{ false };
+// Another app took the headset from home (its session ended without us asking): home waits until
+// the app says the headset is free again, since a new session would take it back and, on SteamVR,
+// tell that app to quit (a player's Echo VR closed 4 s after starting, 2026-11-01).
+static std::atomic<bool> g_homeEvicted{ false };
 
 static void StdinThread()
 {
@@ -1697,7 +1701,7 @@ static bool RunHome()
 	xrEnumerateSwapchainImages(swap, ni, &ni, (XrSwapchainImageBaseHeader*)imgs.data());
 	Log("home: session started (%u images, format %lld)", ni, (long long)fmt);
 
-	bool running = false, done = false;
+	bool running = false, done = false, askedToExit = false;
 	g_shm->homeActive = 1;
 	g_shm->open = 1;
 	g_anchored = false;
@@ -1717,6 +1721,10 @@ static bool RunHome()
 					running = false;
 				} else if (sc->state == XR_SESSION_STATE_EXITING || sc->state == XR_SESSION_STATE_LOSS_PENDING) {
 					done = true;
+					if (!askedToExit) {
+						g_homeEvicted = true;
+						Log("home: another app has the headset; home waits until it's free");
+					}
 				}
 			} else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
 				done = true;
@@ -1728,7 +1736,7 @@ static bool RunHome()
 			std::lock_guard<std::mutex> lk(g_stateLock);
 			g_homeWanted = g_state["home"].truthy();
 		}
-		if ((!g_homeWanted || g_restartHome.exchange(false)) && running) { xrRequestExitSession(session); }
+		if ((!g_homeWanted || g_restartHome.exchange(false)) && running) { xrRequestExitSession(session); askedToExit = true; }
 		if (!running) { Sleep(20); if (!g_homeWanted) break; continue; }
 
 		XrFrameState fs = { XR_TYPE_FRAME_STATE };
@@ -1987,7 +1995,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 			std::lock_guard<std::mutex> lk(g_stateLock);
 			g_homeWanted = g_state["home"].truthy();
 		}
-		if (g_homeWanted && !g_shm->homeActive) {
+		// The headset is free again when the app turns home off (a game started) and back on (it
+		// ended), or asks for home again.
+		if (!g_homeWanted || (g_homeEvicted && g_restartHome.exchange(false))) g_homeEvicted = false;
+		if (g_homeWanted && !g_shm->homeActive && !g_homeEvicted) {
 			// Home: our own session until a game starts (the app turns `home` off) or it ends.
 			if (!RunHome()) Sleep(2000);
 			continue;

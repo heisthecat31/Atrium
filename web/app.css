@@ -309,3 +309,19 @@ select.input { padding-right: 30px; cursor: pointer; }
 .slide input[type=range] { width: 200px; accent-color: var(--accent); }
 .slide b { min-width: 64px; text-align: right; font-weight: 600; color: var(--text); }
 .card .row + .row { margin-top: 14px; }
+
+/* Mix & match: the room from above (sensors and what they look at). */
+.roommap { margin-top: 10px; }
+.roommap svg { width: 100%; max-width: 560px; display: block; background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; }
+.roommap .grid line { stroke: var(--line-2); stroke-width: 1; }
+.roommap .cone { fill: rgba(124,156,255,.12); stroke: rgba(124,156,255,.35); }
+.roommap circle.cam { fill: var(--accent); }
+.roommap circle.ref { fill: var(--good); }
+.roommap text { fill: var(--text); font-size: 12px; }
+.roommap text.h { fill: var(--muted); font-size: 11px; }
+.roommap .live.hmd rect { fill: #f2b45a; }
+.roommap .live.touch circle { fill: #e879f9; }
+.roommap .live text { fill: var(--muted); font-size: 10.5px; }
+.roommap .key { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin: 0 4px 0 8px; vertical-align: -1px; }
+.roommap .key.hmd { background: #f2b45a; border-radius: 3px; }
+.roommap .key.touch { background: #e879f9; }

@@ -10,6 +10,12 @@ use crate::sys;
 
 /// What Meta starts besides OVRServer, closed whenever they show up.
 const EXTRAS: &[&str] = &["client.exe", "oculusdash.exe", "oculus-platform-runtime.exe"];
+/// Meta's Dash is the chosen dash (Settings): strip leaves it running.
+static KEEP_DASH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn keep_meta_dash(keep: bool) {
+    KEEP_DASH.store(keep, std::sync::atomic::Ordering::SeqCst);
+}
 
 const CONFIG: &str = "HKLM\\SOFTWARE\\Wow6432Node\\Oculus VR, LLC\\Oculus\\Config";
 
@@ -59,7 +65,7 @@ pub fn strip() -> Vec<&'static str> {
             let name = String::from_utf16_lossy(&e.szExeFile[..len]).to_lowercase();
             if name == "ovrserver_x64.exe" {
                 server = true;
-            } else if let Some(&x) = EXTRAS.iter().find(|&&x| x == name) {
+            } else if let Some(&x) = EXTRAS.iter().find(|&&x| x == name && !(x == "oculusdash.exe" && KEEP_DASH.load(std::sync::atomic::Ordering::SeqCst))) {
                 found.push((e.th32ProcessID, x));
             }
             ok = Process32NextW(snap, &mut e) != 0;
@@ -120,6 +126,27 @@ pub fn turn_dash_off() -> Result<(), String> {
             return Err("Windows didn't allow turning Meta's Dash off".into());
         }
         sys::log("meta runtime: Dash off");
+    }
+    Ok(())
+}
+
+/// Meta's Dash allowed again (the dash choice in Settings is Meta's): its switch back, admin once.
+pub fn turn_dash_on() -> Result<(), String> {
+    #[cfg(windows)]
+    if dash_off() {
+        let inner = format!("reg add '{CONFIG}' /v PreventDashLaunch /t REG_DWORD /d 0 /f");
+        let ps = format!(
+            "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','{}'",
+            inner.replace('\'', "''")
+        );
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", &ps]);
+        sys::no_window(&mut cmd);
+        let st = cmd.status().map_err(|e| e.to_string())?;
+        if !st.success() || dash_off() {
+            return Err("Windows didn't allow turning Meta's Dash back on".into());
+        }
+        sys::log("meta runtime: Dash on");
     }
     Ok(())
 }

@@ -6,6 +6,8 @@
 //   sensordriver winusb     (admin) every sensor onto WinUSB, USB 3 link power management off
 //   sensordriver restore    (admin) every sensor back to the best driver Windows has (Meta's),
 //                           USB 3 link power management back to what it was
+//   sensordriver replug     (admin) every sensor unplugged and found again, in software (a USB
+//                           port cycle); "winusb" does it to the sensors it changed
 //
 // WinUSB comes from Windows' own signed package (C:\Windows\INF\winusb.inf, "WinUsb Device"),
 // chosen for the sensor the way Device Manager's "pick from a list" does: no driver of Atrium's
@@ -29,12 +31,16 @@
 
 #include <powrprof.h>
 #include <shlobj.h>
+#include <winioctl.h>
+#include <usbioctl.h>
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 
 // The sensor's one interface (vendor class); its parent composite device keeps Windows' driver.
 static const wchar_t kSensorId[] = L"USB\\VID_2833&PID_0211&MI_00";
 static const wchar_t kUsbDeviceClass[] = L"{88BAE032-5A81-49f0-BC3D-A4FF138216D6}";
+// GUID_DEVINTERFACE_USB_HUB (usbiodef.h): the hub interface the port cycle goes through.
+static const GUID kUsbHub = { 0xf18a0e88, 0xc30c, 0x11d0, { 0x88, 0x15, 0x00, 0xa0, 0xc9, 0x06, 0xbe, 0xd8 } };
 // The device interface WinUSB registers for the sensor, which libusb opens it by. winusb.inf only
 // writes one for ADB devices; others bring theirs in descriptors, the sensors don't. Atrium's own.
 static const wchar_t kInterfaceGuids[] = L"{6D0B3F4C-8E2A-4B71-A5C9-2F1E7D3B9A60}\0";
@@ -81,9 +87,10 @@ static bool WriteLpm(DWORD ac, DWORD dc)
 	return ok;
 }
 
-static bool LpmOff()
+static bool LpmOff(bool* changed)
 {
 	DWORD ac, dc;
+	*changed = false;
 	if (!ReadLpm(&ac, &dc)) {
 		printf("USB 3 link power management: can't read the power plan\n");
 		return false;
@@ -100,6 +107,7 @@ static bool LpmOff()
 		return false;
 	}
 	printf("USB 3 link power management: off (was %lu on AC, %lu on battery)\n", ac, dc);
+	*changed = true;
 	return true;
 }
 
@@ -248,6 +256,44 @@ static bool ToWinUsb(HDEVINFO set, SP_DEVINFO_DATA* dev, bool* reboot)
 	return ok;
 }
 
+// A software unplug: the hub resets the sensor's port and Windows finds it again, as after plugging
+// it back in. Sensors that were switched (or had USB power saving turned off) without one gave the
+// tracking service no picture until they were replugged (2026-11-01). Waits until it's back.
+static bool CyclePort(const std::wstring& id)
+{
+	DEVINST iface, dev, hub;
+	if (CM_Locate_DevNodeW(&iface, (DEVINSTID_W)id.c_str(), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return false;
+	if (CM_Get_Parent(&dev, iface, 0) != CR_SUCCESS || CM_Get_Parent(&hub, dev, 0) != CR_SUCCESS) return false;
+	DWORD port = 0;
+	ULONG size = sizeof port;
+	if (CM_Get_DevNode_Registry_PropertyW(dev, CM_DRP_ADDRESS, nullptr, &port, &size, 0) != CR_SUCCESS || !port) return false;
+	wchar_t hubId[MAX_DEVICE_ID_LEN];
+	ULONG len = 0;
+	if (CM_Get_Device_IDW(hub, hubId, MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS ||
+		CM_Get_Device_Interface_List_SizeW(&len, (LPGUID)&kUsbHub, hubId, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS || len < 2)
+		return false;
+	std::vector<wchar_t> path(len);
+	if (CM_Get_Device_Interface_ListW((LPGUID)&kUsbHub, hubId, path.data(), len, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
+		return false;
+	HANDLE h = CreateFileW(path.data(), GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (h == INVALID_HANDLE_VALUE) return false;
+	USB_CYCLE_PORT_PARAMS p = {};
+	p.ConnectionIndex = port;
+	DWORD n;
+	BOOL ok = DeviceIoControl(h, IOCTL_USB_HUB_CYCLE_PORT, &p, sizeof p, &p, sizeof p, &n, nullptr);
+	CloseHandle(h);
+	if (!ok) return false;
+	Sleep(1000);   // it drops off first
+	for (int i = 0; i < 100; i++) {
+		ULONG status, problem;
+		if (CM_Locate_DevNodeW(&iface, (DEVINSTID_W)id.c_str(), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS &&
+			CM_Get_DevNode_Status(&status, &problem, iface, 0) == CR_SUCCESS && (status & DN_STARTED))
+			return true;
+		Sleep(100);
+	}
+	return false;
+}
+
 // Removes the sensor's device node; the rescan installs the best driver Windows has (Meta's).
 static bool Restore(HDEVINFO set, SP_DEVINFO_DATA* dev, bool* reboot)
 {
@@ -275,6 +321,7 @@ int wmain(int argc, wchar_t** argv)
 
 	int failed = 0;
 	bool reboot = false;
+	std::vector<bool> switched(sensors.size());
 	for (size_t i = 0; i < sensors.size(); i++) {
 		const Sensor& s = sensors[i];
 		bool winusb = wcscmp(Kind(s), L"winusb") == 0;
@@ -288,6 +335,7 @@ int wmain(int argc, wchar_t** argv)
 				continue;
 			}
 			printf("%ls: %ls -> WinUSB\n", s.id.c_str(), s.inf.c_str());
+			switched[i] = true;
 			if (!SetInterfaceGuid(set, &devs[i], winusb, &reboot) || (!winusb && !ToWinUsb(set, &devs[i], &reboot))) failed++;
 		} else if (wcscmp(mode, L"restore") == 0) {
 			if (wcscmp(Kind(s), L"meta") == 0) {
@@ -296,8 +344,10 @@ int wmain(int argc, wchar_t** argv)
 			}
 			printf("%ls: %ls -> Windows' choice\n", s.id.c_str(), s.inf.c_str());
 			if (!Restore(set, &devs[i], &reboot)) failed++;
+		} else if (wcscmp(mode, L"replug") == 0) {
+			switched[i] = true;
 		} else {
-			printf("usage: sensordriver status|winusb|restore\n");
+			printf("usage: sensordriver status|winusb|restore|replug\n");
 			SetupDiDestroyDeviceInfoList(set);
 			return 1;
 		}
@@ -306,8 +356,15 @@ int wmain(int argc, wchar_t** argv)
 	if (wcscmp(mode, L"status") == 0) {
 		DWORD ac, dc;
 		if (ReadLpm(&ac, &dc)) printf("usb3-lpm %s\n", ac == 0 && dc == 0 ? "off" : "on");
-	} else if (wcscmp(mode, L"winusb") == 0) {
-		if (!LpmOff()) failed++;
+	} else if (wcscmp(mode, L"winusb") == 0 || wcscmp(mode, L"replug") == 0) {
+		bool lpmChanged = false;
+		if (wcscmp(mode, L"winusb") == 0 && !LpmOff(&lpmChanged)) failed++;
+		// Each changed sensor (all of them after a power plan change) gets a software replug.
+		for (size_t i = 0; i < sensors.size() && !reboot; i++) {
+			if (!switched[i] && !lpmChanged) continue;
+			if (CyclePort(sensors[i].id)) printf("%ls: replugged\n", sensors[i].id.c_str());
+			else printf("%ls: couldn't replug it: unplug it and plug it back in\n", sensors[i].id.c_str());
+		}
 	} else if (wcscmp(mode, L"restore") == 0) {
 		LpmRestore();
 		DEVINST root;

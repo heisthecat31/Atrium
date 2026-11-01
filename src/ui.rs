@@ -65,6 +65,12 @@ fn serve(req: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
             Some(b) => (Cow::Owned(b), "application/octet-stream", "no-store"),
             None => return Response::builder().status(StatusCode::NOT_FOUND).body(Cow::Borrowed(&b""[..])).unwrap(),
         }
+    } else if uri.path() == "/room-live" {
+        // Mix & match: where the sensors see the headset and Touches now (services/mix.rs), polled ~10 times a second.
+        match crate::services::mix::room_live() {
+            Some(b) => (Cow::Owned(b), "application/json", "no-store"),
+            None => return Response::builder().status(StatusCode::NOT_FOUND).body(Cow::Borrowed(&b""[..])).unwrap(),
+        }
     } else if uri.path() == "/art" {
         match art(uri.query().unwrap_or_default()) {
             Some((b, m)) => (Cow::Owned(b), m, "max-age=86400"),

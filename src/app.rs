@@ -68,6 +68,17 @@ struct Running {
     start: &'static str,
 }
 
+/// An installed VR game from the library that's running though Atrium didn't start it.
+/// EchoXR runs Echo VR as echovr_openxr.exe, a patched copy next to echovr.exe.
+fn external_game(games: &[Game], procs: &std::collections::HashSet<String>) -> Option<Running> {
+    games.iter().filter(|g| g.installed && g.vr).find_map(|g| {
+        let exe = g.exe.as_ref()?.file_name()?.to_string_lossy().to_lowercase();
+        let openxr = exe.strip_suffix(".exe").map(|stem| format!("{stem}_openxr.exe"));
+        let found = [Some(exe), openxr].into_iter().flatten().find(|e| procs.contains(e))?;
+        Some(Running { id: g.id.clone(), name: g.name.clone(), exe: found, start: "Outside Atrium" })
+    })
+}
+
 pub struct App {
     state: Mutex<State>,
     proxy: Mutex<tao::event_loop::EventLoopProxy<UiEvent>>,
@@ -82,6 +93,9 @@ impl App {
             settings.save();
         }
         dash::write_settings(settings.dash.as_ref().unwrap_or(&Default::default()));
+        let provider = settings.dash.as_ref().map(|d| d.provider.clone()).unwrap_or_default();
+        dash::set_enabled(provider != "steamvr" && provider != "meta");
+        meta_runtime::keep_meta_dash(provider == "meta");
         let app = Arc::new(App { state: Mutex::new(State { settings, ..Default::default() }), proxy: Mutex::new(proxy) });
         app.watch_hardware();
         meta_runtime::watch();
@@ -157,8 +171,9 @@ impl App {
             "downloads": s.downloads,
             "dash": set.dash.clone().unwrap_or_default(),
             "rift": set.rift,
+            "touch": set.touch,
             "riftAvailable": meta_runtime::installed(),
-            "mix": { "enabled": set.mix.enabled, "controllers": if set.mix.controllers.is_empty() { "cv1" } else { set.mix.controllers.as_str() }, "state": s.mix, "busy": s.mix_busy },
+            "mix": { "enabled": set.mix.enabled, "controllers": if set.mix.controllers.is_empty() { "cv1" } else { set.mix.controllers.as_str() }, "tracking": if set.mix.tracking == "meta" { "meta" } else { "atrium" }, "state": s.mix, "busy": s.mix_busy },
         })
     }
 
@@ -172,17 +187,20 @@ impl App {
         let mut asked_dash_off = false;
         // The Rift tweaks went to this OVRServer (they're lost when it restarts).
         let mut tweaks_applied = false;
+        let mut touchlink_tried = false;
+        self.watch_mix_live();
         self.spawn(move |app| loop {
             let hw = headsets::detect();
-            let (mix_on, touch) = {
+            let (mix_on, touch, meta_tracking) = {
                 let s = app.st();
-                (s.settings.mix.enabled, mix::touch_for(&s.settings))
+                (s.settings.mix.enabled, mix::touch_for(&s.settings), s.settings.mix.tracking == "meta")
             };
             // Mix & match: the Rift on USB only lends its Touches. Atrium's tracking service drives
-            // it (not Meta's runtime) and the game's headset is whatever else is connected.
+            // it (not Meta's runtime) and the game's headset is whatever else is connected. Or, as an
+            // option, Meta's runtime tracks them (TouchLink's meta source): then OVRServer runs.
             let rift = meta_runtime::needed(&hw);
             let mut st = rt::state(&hw, mix_on);
-            if mix_on {
+            if mix_on && !meta_tracking {
                 if rift && !mix::service_running() {
                     if let Err(e) = mix::start_service() {
                         sys::log(&e);
@@ -191,7 +209,26 @@ impl App {
             } else if mix::service_running() {
                 mix::stop_service();
             }
+            if mix_on && meta_tracking && rift && meta_runtime::installed() && !meta_runtime::running() {
+                if let Err(e) = meta_runtime::start() {
+                    sys::log(&e);
+                }
+            }
+            // TouchLink's Meta helper, before SteamVR takes the Rift's display (mix::keep_meta_helper).
+            if mix_on && meta_tracking && meta_runtime::running() {
+                mix::keep_meta_helper();
+            } else {
+                mix::stop_meta_helper();
+            }
             let mix_state = mix::state(rift);
+            // With a SteamVR headset, the Touches reach SteamVR games through TouchLink's driver:
+            // registered once, so nobody has to run touchlink.exe.
+            if mix_on && !touchlink_tried && mix_state.touchlink.as_ref().is_some_and(|t| !t.registered) {
+                touchlink_tried = true;
+                if let Err(e) = mix::install_touchlink() {
+                    app.notice(e);
+                }
+            }
             // A wired Rift drops off USB for a moment whenever OVRServer powers it up; don't let
             // one missed pass hand the next game to another backend (Virtual Desktop's service
             // always runs, so it would win).
@@ -206,8 +243,11 @@ impl App {
                 }
             }
             rt::write_backend(&st, touch.as_deref());
-            // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does.
-            if !mix_on && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
+            // A wired Rift: OVRServer runs inside Atrium for as long as Atrium does. Not when another
+            // wired headset (an Index, ...) is there: the Rift is then only the Touches' radio, and
+            // OVRServer would take it from the tracking service (TouchLink).
+            let other_wired = hw.headsets.iter().any(|h| h.via == "USB" && h.family != "rift" && h.family != "rifts");
+            if !mix_on && !other_wired && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::running() {
                 if let Err(e) = meta_runtime::start() {
                     sys::log(&e);
                 }
@@ -215,7 +255,8 @@ impl App {
             // ...with Meta's Dash off, so the headset goes to Atrium's dash (home) too. Asked once
             // per run: if Windows says no, games still ask again when they start.
             // Not in mix & match: Meta's runtime isn't used then.
-            if !mix_on && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::dash_off() && !asked_dash_off {
+            let meta_dash = app.st().settings.dash.as_ref().is_some_and(|d| d.provider == "meta");
+            if !mix_on && !other_wired && !meta_dash && meta_runtime::needed(&hw) && meta_runtime::installed() && !meta_runtime::dash_off() && !asked_dash_off {
                 asked_dash_off = true;
                 match meta_runtime::turn_dash_off() {
                     Ok(()) => dash::restart_home(),
@@ -245,13 +286,43 @@ impl App {
                 s.hw = Some(hw);
                 s.rt = Some(st);
                 // The game Atrium started has ended: the dash goes back to home.
-                if s.running.as_ref().is_some_and(|r| !sys::processes().contains(&r.exe)) {
+                let procs = sys::processes();
+                if s.running.as_ref().is_some_and(|r| !procs.contains(&r.exe)) {
                     s.running = None;
+                }
+                // A VR game Atrium didn't start (its store, EchoXR.exe, a shortcut) has the
+                // headset too: home leaves it alone. On SteamVR a second session takes the
+                // headset and the game is told to quit (a player's Echo closed 4 s in, 2026-11-01).
+                if s.running.is_none() && s.launching.is_none() {
+                    s.running = external_game(&s.games, &procs);
                 }
                 s.mix = Some(mix_state);
             }
             app.push();
             std::thread::sleep(Duration::from_secs(5));
+        });
+    }
+
+    /// The room and the Touch calibration change by the second (a sensor being placed, a
+    /// calibration under way): read them every second, pushed only when they change.
+    fn watch_mix_live(self: &Arc<Self>) {
+        self.spawn(move |app| loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let (room, touchlink) = (mix::room(), mix::touchlink());
+            let changed = {
+                let mut s = app.st();
+                match s.mix.as_mut() {
+                    Some(m) if m.room != room || m.touchlink != touchlink => {
+                        m.room = room;
+                        m.touchlink = touchlink;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                app.push();
+            }
         });
     }
 
@@ -547,15 +618,46 @@ impl App {
             // Dash look and controls, from the window or the dash itself: one copy, here.
             "setDash" => {
                 let Ok(d) = serde_json::from_value::<crate::sys::settings::DashSettings>(m["dash"].clone()) else { return };
-                {
+                let was = {
                     let mut s = self.st();
                     if s.settings.dash.as_ref() == Some(&d) {
                         return;
                     }
+                    let was = s.settings.dash.as_ref().map(|o| o.provider.clone()).unwrap_or_default();
                     s.settings.dash = Some(d.clone());
                     s.settings.save();
-                }
+                    was
+                };
                 dash::write_settings(&d);
+                // Which dash the headset gets: Atrium's (its process), or SteamVR's / Meta's with
+                // Atrium's closed. Meta's needs its own switch back on (Atrium turns it off for its own).
+                if was != d.provider {
+                    let meta = d.provider == "meta";
+                    dash::set_enabled(!meta && d.provider != "steamvr");
+                    meta_runtime::keep_meta_dash(meta);
+                    if meta && meta_runtime::installed() && meta_runtime::dash_off() {
+                        self.spawn(|app| match meta_runtime::turn_dash_on() {
+                            Ok(()) => app.notice("Meta's Dash is on again: it shows from Meta's runtime's next start"),
+                            Err(e) => app.notice(e),
+                        });
+                    }
+                }
+                self.push();
+            }
+            // Where the Touches sit in the hand (SteamVR, through TouchLink): applied at once.
+            "setTouch" => {
+                let Ok(o) = serde_json::from_value::<crate::sys::settings::TouchOffset>(m["touch"].clone()) else { return };
+                {
+                    let mut s = self.st();
+                    if s.settings.touch == o {
+                        return;
+                    }
+                    s.settings.touch = o.clone();
+                    s.settings.save();
+                }
+                if let Err(e) = mix::set_touch_offset(&o) {
+                    self.notice(format!("Couldn't save the Touch offset: {e}"));
+                }
                 self.push();
             }
             // Rift tweaks: saved, and sent to OVRServer now if it's running.
@@ -837,10 +939,10 @@ impl App {
                     s.settings.mix.controllers = "cv1".into();
                     s.settings.save();
                 }
-                if on {
+                if on && self.st().settings.mix.tracking != "meta" {
                     // Meta's runtime would fight Atrium's tracking service for the Rift's radio.
                     meta_runtime::stop();
-                } else {
+                } else if !on {
                     mix::stop_service();
                 }
                 self.notice(if on { "Mix & match on: games get your CV1 Touches once they're calibrated" } else { "Mix & match off: games get the headset's own controllers" });
@@ -863,6 +965,38 @@ impl App {
                 }
                 Err(e) => self.notice(e),
             },
+            "mixTracking" => {
+                let meta = m["tracking"].as_str() == Some("meta");
+                {
+                    let mut s = self.st();
+                    s.settings.mix.tracking = if meta { "meta".into() } else { "atrium".into() };
+                    s.settings.save();
+                }
+                // One choice does it all. Meta: Atrium's service off, the Rift handed back to Meta
+                // (its service and the sensors' driver, one admin prompt), TouchLink told; Atrium then
+                // starts Meta's runtime (watch_hardware) and TouchLink keeps the Rift "worn".
+                self.mix_step("tracking", if meta { "Meta's runtime tracks the Touches: restart SteamVR" } else { "Atrium tracks the Touches: restart SteamVR" }, move || {
+                    if meta {
+                        mix::stop_service();
+                        mix::give_rift_to_meta()?;
+                    } else {
+                        meta_runtime::stop();
+                    }
+                    mix::set_touchlink_source(meta)
+                });
+            }
+            // Meta tracking chosen but the Rift isn't Meta's yet (sensors on WinUSB): the same handoff.
+            "mixGiveToMeta" => self.mix_step("tracking", "The Rift is Meta's again: restart SteamVR", || {
+                mix::stop_service();
+                mix::give_rift_to_meta()?;
+                mix::set_touchlink_source(true)
+            }),
+            "mixInstallTouchLink" => self.mix_step("touchlink", "TouchLink is in SteamVR: restart SteamVR to load it", mix::install_touchlink),
+            "mixCalibrateTouchLink" => match mix::calibrate_touchlink() {
+                Ok(()) => self.notice("Hold a Touch against the side of the headset and look around until both Touches buzz"),
+                Err(e) => self.notice(e),
+            },
+            "mixResetRoom" => self.mix_step("room", "Room cleared: the sensors are being placed again", mix::reset_room),
             "registerRuntime" => self.spawn(|app| match rt::register() {
                 Ok(()) => app.notice("Atrium is now the OpenXR runtime"),
                 Err(e) => app.notice(e),

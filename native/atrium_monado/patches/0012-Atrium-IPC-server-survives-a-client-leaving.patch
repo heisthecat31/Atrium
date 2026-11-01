@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: he_is_the_cat <125207670+heisthecat31@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 18:20:00 +0000
+Subject: [PATCH] Atrium: the Windows IPC server survives a client leaving early
+
+A client that connected and closed before the server called ConnectNamedPipe
+(ERROR_NO_DATA, 232) stopped the whole service: its main loop ended and the
+sensors' USB streams died. TouchLink's SteamVR driver retries every few
+seconds while the service starts, so this killed the tracking service again
+and again. Drop that pipe instance and listen again instead.
+---
+diff --git a/src/xrt/ipc/server/ipc_server_mainloop_windows.cpp b/src/xrt/ipc/server/ipc_server_mainloop_windows.cpp
+--- a/src/xrt/ipc/server/ipc_server_mainloop_windows.cpp
++++ b/src/xrt/ipc/server/ipc_server_mainloop_windows.cpp
+@@ -203,6 +203,12 @@
+ 	}
+ 
+ 	DWORD err = GetLastError();
++	// Atrium: the client is already gone (no data / broken pipe): drop it and listen again.
++	if (err == ERROR_NO_DATA || err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED) {
++		U_LOG_W("A client left while connecting: %lu %s; listening again", err, ipc_winerror(err));
++		DisconnectNamedPipe(ml->pipe_handle);
++		return;
++	}
+ 	U_LOG_E("SetNamedPipeHandleState(PIPE_READMODE_MESSAGE | PIPE_WAIT) failed: %lu %s", err, ipc_winerror(err));
+ 	ipc_server_handle_failure(vs);
+ }
+@@ -242,6 +248,12 @@
+ 	switch (DWORD err = GetLastError()) {
+ 	case ERROR_PIPE_LISTENING: return;
+ 	case ERROR_PIPE_CONNECTED: handle_connected_client(vs, ml); return;
++	case ERROR_NO_DATA:
++		// Atrium: a client connected and left before we got to it (one retrying while the service
++		// starts). That's that client's business: drop it and listen again, don't stop the service.
++		U_LOG_W("A client left before it was served; listening again");
++		DisconnectNamedPipe(ml->pipe_handle);
++		return;
+ 	default:
+ 		U_LOG_E("ConnectNamedPipe failed: %lu %s", err, ipc_winerror(err));
+ 		ipc_server_handle_failure(vs);

@@ -30,6 +30,23 @@ pub struct Settings {
     pub dash: Option<DashSettings>,
     /// Meta runtime tweaks for wired Rifts (applied to OVRServer each time it starts).
     pub rift: RiftTweaks,
+    /// Where the CV1 Touches sit in the hand in SteamVR (TouchLink's grip_offset).
+    pub touch: TouchOffset,
+}
+
+/// A turn and shift of each Touch in its own frame, on top of the calibration: for a Touch that
+/// feels tilted or set off in the hand. TouchLink applies it at once (config.json grip_offset).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct TouchOffset {
+    /// Degrees: tip up (+) / down, turned left (+) / right, rolled left (+) / right.
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+    /// Centimetres: right, up, back (the Touch's own axes).
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -52,6 +69,9 @@ pub struct DashSettings {
     pub pause_game: bool,
     /// Pressing the key, games get the value (button ids as open_button, without "oculus").
     pub remap: std::collections::BTreeMap<String, String>,
+    /// Which dash the headset gets: "atrium" (Atrium's own), "steamvr" (SteamVR's dashboard: Atrium's
+    /// stays closed) or "meta" (Meta's Dash: Atrium's stays closed and Meta's is allowed again).
+    pub provider: String,
 }
 
 impl Default for DashSettings {
@@ -66,6 +86,7 @@ impl Default for DashSettings {
             open_mode: "hold".into(),
             pause_game: false,
             remap: Default::default(),
+            provider: "atrium".into(),
         }
     }
 }
@@ -111,6 +132,9 @@ pub struct MixSettings {
     pub enabled: bool,
     /// The controllers used instead of the headset's own: "cv1" (Rift CV1 Touches).
     pub controllers: String,
+    /// What tracks the CV1 Touches: "" / "atrium" (Atrium's tracking service) or "meta" (Meta's
+    /// runtime, an option: it needs the Oculus app installed and the sensors on Meta's driver).
+    pub tracking: String,
 }
 
 /// A Meta game Atrium downloaded: every version kept, one folder each, one of them played.

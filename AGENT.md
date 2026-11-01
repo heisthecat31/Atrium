@@ -42,6 +42,7 @@ Notes for any agent (or person) picking up this project. Read this first.
 | `native/src/` | `ovrprobe` (Meta runtime probe, `ovrprobe json`), `SteamFrameSim` (simulated Steam Frame) |
 | `Dashboard/` | in-VR dashboard, **Unity** (OpenXR plugin only), owned by a second dev. See `Dashboard/README.md`; app↔dashboard protocol not defined yet |
 | `native/atrium_ovr/` | Atrium OVR: CMake fetches pinned Revive/OpenXR SDK/Oculus SDK/Detours, builds `LibOVRRT64_1.dll` (static CRT + static OpenXR loader, one DLL). Log: `%APPDATA%\Atrium\logs\ovr.log` |
+| `native/touchlink/` | TouchLink, a separate tool: CV1 Touches as SteamVR controllers next to any headset (Index), tracked by Atrium's service + Rift sensors, calibrated against the headset. `touchlink.exe install/calibrate/status`; `%APPDATA%\TouchLink\status.json` for Atrium. See its README |
 | `src/sys/inject.rs` | starts a game suspended with Atrium OVR loaded (remote LoadLibraryW), sets `LIBOVR_DLL_DIR` + `XR_RUNTIME_JSON` |
 | `native/third_party/LibOVR` | optional local Oculus SDK copy, gitignored; build.bat falls back to the fetched one |
 | `assets/` | Atrium icon |

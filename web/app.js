@@ -298,6 +298,109 @@ function step(ok, title, body, action = '') {
   return `<div class="item"><i class="dot ${ok ? 'on' : 'warn'}"></i><div class="grow"><b>${title}</b><div class="sub-l">${body}</div></div>${action}</div>`;
 }
 
+// Room calibration (the tracking service places every sensor but the first; rift_room.json).
+const ROOM_FIRST_SOLVE = 60;
+
+function roomStep(st) {
+  const room = st.room || [];
+  if (room.length < 2) return '';
+  const waiting = room.filter((s) => !s.placed);
+  if (!waiting.length) return step(true, 'Room set up', `${room.length} sensors placed, and kept refined while you play.`);
+  const body = !st.service_running ? 'The sensors are placed while the tracking service runs.'
+    : waiting.map((s) => `Sensor ${room.indexOf(s) + 1}: ${s.sightings} points${s.sightings < ROOM_FIRST_SOLVE ? ` of ${ROOM_FIRST_SOLVE}` : ', keep going, over a wider area'}`).join(' · ')
+      + '. As in Meta\'s setup: hold the Rift headset (or a Touch) where both sensors see it and slowly move it around, up and down and side to side, over a metre or so.';
+  return step(false, 'Room set up', body);
+}
+
+// The room from above: x right, -z up the page (the way the reference sensor looks across).
+function roomMap(room) {
+  const placed = room.filter((s) => s.placed);
+  const W = 460, H = 280, pad = 40;
+  const xs = placed.map((s) => s.pose[0]), zs = placed.map((s) => s.pose[2]);
+  const cx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0, cz = zs.length ? (Math.min(...zs) + Math.max(...zs)) / 2 : 0;
+  const span = Math.max(3, ...xs.map((x) => Math.abs(x - cx) * 2 + 1), ...zs.map((z) => Math.abs(z - cz) * 2 + 1));
+  const k = Math.min(W - 2 * pad, H - 2 * pad) / span;
+  const P = (x, z) => [W / 2 + (x - cx) * k, H / 2 + (z - cz) * k];
+  // A camera looks along its -z: turn (0, 0, -1) by the pose's quaternion.
+  const look = ([, , , qx, qy, qz, qw]) => [-(2 * (qx * qz + qw * qy)), -(1 - 2 * (qx * qx + qy * qy))];
+  let grid = '';
+  for (let m = -10; m <= 10; m++) {
+    const [gx] = P(Math.round(cx) + m, 0), [, gz] = P(0, Math.round(cz) + m);
+    if (gx > 0 && gx < W) grid += `<line x1="${gx}" y1="0" x2="${gx}" y2="${H}"/>`;
+    if (gz > 0 && gz < H) grid += `<line x1="0" y1="${gz}" x2="${W}" y2="${gz}"/>`;
+  }
+  const marks = placed.map((s) => {
+    const [x, y] = P(s.pose[0], s.pose[2]);
+    let [dx, dz] = look(s.pose);
+    const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+    const a = Math.atan2(dz, dx), fov = 0.7, r = 70;
+    const cone = `M${x},${y} L${x + r * Math.cos(a - fov)},${y + r * Math.sin(a - fov)} A${r},${r} 0 0,1 ${x + r * Math.cos(a + fov)},${y + r * Math.sin(a + fov)} Z`;
+    const i = room.indexOf(s) + 1;
+    return `<path class="cone" d="${cone}"/><circle class="${s.reference ? 'ref' : 'cam'}" cx="${x}" cy="${y}" r="7"/>
+      <text x="${x}" y="${y - 13}" text-anchor="middle">Sensor ${i}${s.reference ? ' (reference)' : ''}</text>
+      <text class="h" x="${x}" y="${y + 22}" text-anchor="middle">${s.pose[1].toFixed(2)} m up</text>`;
+  }).join('');
+  const waiting = room.filter((s) => !s.placed).map((s) => `<div class="sub-l">Sensor ${room.indexOf(s) + 1} (${esc(s.serial)}): not placed yet, ${s.sightings} points</div>`).join('');
+  // The live layer (roomLiveLoop) draws the headset and Touches here, with the same mapping.
+  return `<svg id="roomsvg" viewBox="0 0 ${W} ${H}" data-cx="${cx}" data-cz="${cz}" data-k="${k}" role="img" aria-label="Rift sensors seen from above"><g class="grid">${grid}</g>${marks}<g id="roomlive"></g></svg>
+    <div class="sub-l">Grid: 1 m. Live: <span class="key touch"></span>Touches, where the sensors see them now.</div>${waiting}`;
+}
+
+// The headset and the Touches on the room map, ~10 times a second while Mix & match is open (/room-live,
+// rift_live.json: tracker device 0 is the headset, the Touches follow).
+const roomLive = { running: false };
+async function roomLiveLoop() {
+  if (roomLive.running) return;
+  roomLive.running = true;
+  while (ui.page === 'mix') {
+    const svg = $('#roomsvg'), layer = $('#roomlive');
+    const r = svg ? await fetch('/room-live', { cache: 'no-store' }).catch(() => null) : null;
+    if (svg && layer) {
+      const j = r && r.ok ? await r.json().catch(() => null) : null;
+      const W = 460, H = 280, cx = +svg.dataset.cx, cz = +svg.dataset.cz, k = +svg.dataset.k;
+      layer.innerHTML = (j?.devices || []).filter((d) => d.age_ms < 1500).map((d) => {
+        // In Mix & match the Rift headset is only the radio and isn't tracked (patch 0015): everything the
+        // sensors see is a Touch, whatever the tracker's numbering.
+        const x = W / 2 + (d.pos[0] - cx) * k, y = H / 2 + (d.pos[2] - cz) * k;
+        return `<g class="live touch" opacity="${d.age_ms > 300 ? 0.4 : 1}">
+          <circle cx="${x}" cy="${y}" r="5"/>
+          <text x="${x}" y="${y + 18}" text-anchor="middle">Touch · ${d.pos[1].toFixed(2)} m</text></g>`;
+      }).join('');
+    }
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  roomLive.running = false;
+}
+
+// The Touches in SteamVR games (TouchLink's driver): rows for the steps list...
+function touchlinkSteps(t, btn) {
+  const loaded = t.registered && t.running;
+  return step(loaded, 'Touches in SteamVR', !t.registered ? 'Adds the Touches to SteamVR as Oculus Touch controllers, for every SteamVR game.'
+      : t.running ? (t.connected ? 'Loaded in SteamVR and connected to the tracking service.' : 'Loaded in SteamVR, waiting for the tracking service.')
+      : 'Added. Start (or restart) SteamVR to load it.',
+      t.registered ? '' : btn('mixInstallTouchLink', 'Add to SteamVR', true, 'touchlink'))
+    + step(t.calibrated && !t.calibrating, 'Lined up with SteamVR', t.calibrating ? esc(t.calibration_message)
+      : t.calibrated ? `${(t.error_mm / 10).toFixed(1)} cm fit. Again only if the sensors or base stations move.`
+      : 'Once: hold a Touch against the side of the headset and look around until both Touches buzz.',
+      t.running && !t.calibrating ? btn('mixCalibrateTouchLink', t.calibrated ? 'Calibrate again' : 'Calibrate', !t.calibrated) : '');
+}
+
+// ...and a live card: what's tracked right now, and the calibration as it happens.
+function touchlinkCard(t) {
+  if (!t.running) return '';
+  const hand = (i) => !t.active[i] ? ['', 'Off: press a button'] : t.tracked[i] ? ['on', 'Seen by a sensor'] : ['warn', 'Not seen: face a sensor'];
+  const row = (cls, name, text) => `<div class="item"><i class="dot ${cls}"></i><div class="grow"><b>${name}</b><div class="sub-l">${text}</div></div></div>`;
+  return `<h2>Touches in SteamVR</h2>
+    <div class="card list steps">
+      ${row(t.hmd_tracked ? 'on' : 'warn', 'Headset', t.hmd_tracked ? 'Tracked by the base stations' : 'Not tracked: wake it (put it on)')}
+      ${row(hand(0)[0], 'Left Touch', hand(0)[1])}
+      ${row(hand(1)[0], 'Right Touch', hand(1)[1])}
+      ${t.calibrating ? row('warn', 'Calibrating', `${esc(t.calibration_message)}<br>Hold either Touch flat and firm against the side of the headset (the side facing the sensors) and slowly look left, right, up, down, and tilt your head.`) : ''}
+      ${t.camera ? row(t.camera_updates ? 'on' : 'warn', 'Headset cameras', `${esc(t.camera)}${t.camera_mm ? ` · ${(t.camera_mm / 10).toFixed(1)} cm fit` : ''}${t.camera_updates ? ` · corrected the calibration ${t.camera_updates}×` : ''}. They see the Touches' lights and keep the calibration right while you play.`) : ''}
+      ${t.message ? row('warn', 'TouchLink', esc(t.message)) : ''}
+    </div>`;
+}
+
 function mix() {
   const m = S.mix || {}, st = m.state, busy = m.busy;
   const others = (S.hw?.headsets || []).filter((h) => !(h.family === 'rift' && h.via === 'USB'));
@@ -308,6 +411,11 @@ function mix() {
   if (!st) return `<div class="page">${head}<div class="empty">Checking your devices…</div></div>`;
   const sensorsOk = st.sensors.length > 0 && st.sensors.every(([, k]) => k === 'winusb') && st.lpm_off;
   const cal = st.calibration;
+  // A wired headset (an Index, ...) is a SteamVR headset: its games get the Touches through TouchLink.
+  const steamvr = !!headset && headset.via === 'USB' && !!st.touchlink;
+  // Option: Meta's runtime tracks the Touches (TouchLink's meta source); its sensors on Meta's driver.
+  const metaTracking = m.tracking === 'meta';
+  const metaSensorsOk = st.sensors.length > 0 && st.sensors.every(([, k]) => k === 'meta');
   const btn = (cmd, label, primary = false, which = '') => `<button class="btn ${primary ? 'primary' : ''}" data-cmd="${cmd}" ${busy ? 'disabled' : ''}>${busy && busy === which ? 'Waiting for Windows…' : label}</button>`;
   return `<div class="page">
     ${head}
@@ -318,12 +426,24 @@ function mix() {
           <option value="own" ${m.enabled ? '' : 'selected'}>Headset's own controllers</option>
           <option value="cv1" ${m.enabled ? 'selected' : ''}>Rift CV1 Touches</option>
         </select></div>
+      ${m.enabled ? `<div class="row"><div class="grow"><h4>Touch tracking</h4><p>${metaTracking
+        ? 'Meta\'s runtime tracks the Touches. It needs the Oculus app installed and the Rift fully connected, HDMI as well as USB (Meta\'s runtime won\'t open a Rift without its display). Atrium keeps Meta\'s software running and the sensors on Meta\'s driver.'
+        : 'Atrium tracks the Touches with your Rift sensors. The Rift only needs its USB cable. No Meta software.'}</p></div>
+        <select class="input" id="mixtracking" style="width:240px">
+          <option value="atrium" ${metaTracking ? '' : 'selected'}>Atrium (Rift on USB)</option>
+          <option value="meta" ${metaTracking ? 'selected' : ''}>Meta's runtime (Rift on HDMI + USB)</option>
+        </select></div>` : ''}
       ${st.available ? '' : '<div class="note">Atrium\'s tracking service isn\'t built yet: native\\atrium_monado\\build.ps1 -Rift, then native\\build.bat.</div>'}
     </div>
     <h2>Getting the Touches ready</h2>
     <div class="card list steps">
       ${step(!!headset, 'Headset connected', headset ? `${esc(headset.name)} (${esc(headset.via)}): games show on it.` : 'Start Virtual Desktop on your headset and connect to this PC. Games can\'t start without a headset.')}
       ${step(st.rift, 'Rift CV1 headset on USB', 'The Touches talk to the PC through the Rift\'s radio. It only needs its USB cable; the display isn\'t used.')}
+      ${metaTracking ? `
+      ${step(st.meta_running, 'Meta\'s runtime', st.meta_running ? 'Running: it tracks the Touches.' : m.enabled ? (st.rift ? 'Starting…' : 'Starts when the Rift is plugged in.') : 'Starts when you pick Rift CV1 Touches above.')}
+      ${step(metaSensorsOk, `Sensors on Meta's driver${st.sensors.length ? ` (${st.sensors.length})` : ''}`,
+        st.sensors.length ? st.sensors.map(([, k]) => esc((SENSOR_KIND[k] || SENSOR_KIND.other)[1])).join(' · ') : 'No Rift sensor plugged in.',
+        st.sensors.length && !metaSensorsOk ? btn('mixGiveToMeta', 'Set up for Meta', true, 'tracking') : '')}` : `
       ${step(!st.meta_running, 'Meta\'s software off', st.meta_running ? 'Meta\'s runtime is running and fights Atrium for the Rift. It comes back when you restart the PC.' : 'Atrium drives the Rift itself.',
         st.meta_running ? btn('mixStopMeta', 'Turn it off', true, 'meta') : '')}
       ${step(sensorsOk, `Sensors on Atrium's driver${st.sensors.length ? ` (${st.sensors.length})` : ''}`,
@@ -331,11 +451,19 @@ function mix() {
         st.sensors.length ? (sensorsOk ? btn('mixRestoreSensors', 'Give back to Meta', false, 'sensors') : btn('mixSetupSensors', 'Set up sensors', true, 'sensors')) : '')}
       ${step(st.service_running, 'Atrium\'s tracking service', st.service_running ? 'Running: tracking the Touches with your sensors.' : m.enabled ? (st.rift ? 'Starting…' : 'Starts when the Rift is plugged in.') : 'Starts when you pick Rift CV1 Touches above.',
         st.service_running ? btn('mixRestartService', 'Restart', false, 'service') : '')}
-      ${step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one with a Touch in each hand; when they buzz, move both hands around, turning your wrists, for 5 seconds.'
+      ${roomStep(st)}`}
+      ${steamvr ? touchlinkSteps(st.touchlink, btn) : step(!!cal, 'Calibrated', st.calibrating ? 'Waiting for a game: start one with a Touch in each hand; when they buzz, move both hands around, turning your wrists, for 5 seconds.'
         : cal ? `Lined up with your headset's ${esc(cal.reference)} space, ${(cal.error_mm / 10).toFixed(1)} cm off on average (${ago(cal.when).toLowerCase()}).`
         : 'Lines the Touches up with your headset, once; no other controllers needed (the headset\'s hand tracking sees your hands). In a game, with a Touch in each hand: press X, Y, A and B together (or Calibrate here), then move both hands around, turning your wrists, for 5 seconds. A short buzz means done.',
         m.enabled ? btn('mixCalibrate', cal ? 'Calibrate again' : 'Calibrate', !cal) : '')}
     </div>
+    ${st.room.length && !metaTracking ? `<h2>Room</h2>
+    <div class="card room">
+      <div class="row"><div class="grow"><p>Where the tracking service has put each sensor, seen from above. The first sensor is the reference; the others are placed from where the Rift headset or a Touch is while a placed sensor sees it too (as Meta's setup did), and keep getting refined.</p></div>
+        ${btn('mixResetRoom', 'Place again', false, 'room')}</div>
+      <div class="roommap">${roomMap(st.room)}</div>
+    </div>` : ''}
+    ${steamvr && st.touchlink ? touchlinkCard(st.touchlink, btn) : ''}
     <h2>What the sensors see</h2>
     <div class="card">
       <div class="row"><div class="grow"><p>A live picture from each sensor, brightened so you can see the room. Point them so they see where you play; the Touches' lights show as bright dots.</p></div>
@@ -486,6 +614,7 @@ function settings() {
       </select>
     </div></div>
     ${dashSettings()}
+    ${touchSettings()}
     ${S.riftAvailable ? riftSettings() : ''}
   </div>`;
 }
@@ -503,6 +632,7 @@ function dashSettings() {
   const d = S.dash || {};
   const remap = d.remap || {};
   return `<h2>Dash</h2><div class="card">
+    ${setRow('Which dash', 'Atrium\'s own, or SteamVR\'s dashboard or Meta\'s Dash with Atrium\'s closed. Meta\'s asks Windows once to switch it back on.', pick('dash', 'provider', 'str', [['atrium', 'Atrium'], ['steamvr', 'SteamVR'], ['meta', 'Meta']], d.provider || 'atrium'))}
     ${setRow('Distance', 'How far in front of you the dash floats.', slider('dash', 'distance', 0.6, 2.5, 0.05, d.distance, (v) => `${(+v).toFixed(2)} m`))}
     ${setRow('Size', 'How wide the panel is.', slider('dash', 'width', 0.9, 3, 0.1, d.width, (v) => `${(+v).toFixed(1)} m`))}
     ${setRow('Curve', 'Flat to strongly curved.', slider('dash', 'curve', 0, 1, 0.1, d.curve, (v) => `${Math.round(v * 100)}%`))}
@@ -518,6 +648,22 @@ function dashSettings() {
     <p style="margin:0 0 10px">What games get when you press each button. Applies from the next game start.</p>
     ${DASH_BUTTONS.map(([id, name]) => setRow(`${name}`, '', `<select class="input" data-remap="${id}" style="width:220px">${opts([[id, 'Same'], ...DASH_BUTTONS.filter(([b]) => b !== id)], remap[id] || id)}</select>`)).join('')}
     <div class="row"><div class="grow"></div><button class="btn" id="remapreset">Reset all</button></div>
+  </div>`;
+}
+
+// Where the CV1 Touches sit in the hand in SteamVR (TouchLink applies it at once).
+function touchSettings() {
+  const o = S.touch || {};
+  const deg = (v) => `${(+v).toFixed(0)}°`, cm = (v) => `${(+v).toFixed(1)} cm`;
+  return `<h2>Touch controllers in SteamVR</h2><div class="card">
+    <p style="margin:0 0 10px">If your CV1 Touches look tilted or set off in your hands (Mix & match, TouchLink). Changes apply at once, on top of the calibration.</p>
+    ${setRow('Tilt', 'Tip up or down.', slider('touch', 'pitch', -45, 45, 1, o.pitch || 0, deg))}
+    ${setRow('Turn', 'Point left or right.', slider('touch', 'yaw', -45, 45, 1, o.yaw || 0, deg))}
+    ${setRow('Roll', 'Roll left or right.', slider('touch', 'roll', -45, 45, 1, o.roll || 0, deg))}
+    ${setRow('Move right / left', '', slider('touch', 'x', -10, 10, 0.5, o.x || 0, cm))}
+    ${setRow('Move up / down', '', slider('touch', 'y', -10, 10, 0.5, o.y || 0, cm))}
+    ${setRow('Move back / forward', '', slider('touch', 'z', -10, 10, 0.5, o.z || 0, cm))}
+    <div class="row"><div class="grow"></div><button class="btn" id="touchreset">Reset</button></div>
   </div>`;
 }
 
@@ -538,15 +684,20 @@ function riftSettings() {
   </div>`;
 }
 
-// A changed dash/Rift control: the whole group goes to Atrium.
+// Which settings group a control belongs to (data-dash, data-rift, data-touch).
+const groupOf = (el) => ['dash', 'rift', 'touch'].find((g) => el.dataset && el.dataset[g] !== undefined);
+
+// A changed dash/Rift/Touch control: the whole group goes to Atrium.
 function settingChanged(el) {
-  const group = el.dataset.dash !== undefined ? 'dash' : 'rift';
+  const group = groupOf(el);
   const key = el.dataset[group];
   const kind = el.dataset.kind;
   const v = el.value;
   const val = kind === 'num' ? parseFloat(v) : kind === 'int' ? parseInt(v, 10) : kind === 'bool' ? v === 'true' : v;
   const obj = { ...(S[group] || {}), [key]: val };
-  if (group === 'dash') send('setDash', { dash: obj }); else send('setRift', { rift: obj });
+  if (group === 'dash') send('setDash', { dash: obj });
+  else if (group === 'touch') send('setTouch', { touch: obj });
+  else send('setRift', { rift: obj });
 }
 
 // ---- render -------------------------------------------------------------------------------
@@ -556,9 +707,25 @@ function pageSig() {
     case 'devices': return JSON.stringify(S.hw);
     case 'runtime': return JSON.stringify([S.rt, S.ovr]);
     case 'mix': return JSON.stringify([S.mix, (S.hw?.headsets || []).map((h) => [h.name, h.via, h.active])]);
-    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir, S.dash, S.rift, S.riftAvailable]);
+    case 'settings': return JSON.stringify([S.autostart, S.closeAction, S.mirrorEye, S.downloadDir, S.dash, S.rift, S.riftAvailable, S.touch]);
     default: return JSON.stringify([S.steam, S.steamKey, S.meta, S.localGames, S.busy.signingIn]);
   }
+}
+
+// Mix & match changes by the second (the room, the Touches): replace only the cards that changed,
+// so the rest (the live sensor view, an open dropdown, the scroll) stays as it is.
+function patchPage(main, html) {
+  const t = document.createElement('template');
+  t.innerHTML = html.trim();
+  const fresh = t.content.firstElementChild, cur = main.firstElementChild;
+  const parts = [...(fresh?.children || [])].map((c) => c.outerHTML);
+  if (!cur || !drawn.parts || drawn.parts.length !== parts.length || drawn.partsPage !== ui.page) {
+    main.innerHTML = html;
+  } else {
+    parts.forEach((h, i) => { if (drawn.parts[i] !== h) cur.children[i].replaceWith(fresh.children[i].cloneNode(true)); });
+  }
+  drawn.parts = parts;
+  drawn.partsPage = ui.page;
 }
 
 function render() {
@@ -566,7 +733,7 @@ function render() {
   renderSide();
   const main = $('#main');
   if (drawn.page !== ui.page) {
-    drawn.page = ui.page; drawn.sig = null;
+    drawn.page = ui.page; drawn.sig = null; drawn.parts = null;
     main.scrollTop = 0;
     if (ui.page === 'library') main.innerHTML = libraryShell();
   }
@@ -574,8 +741,10 @@ function render() {
   if (sig !== drawn.sig) {
     drawn.sig = sig;
     if (ui.page === 'library') libraryBody();
+    else if (ui.page === 'mix') patchPage(main, mix());
     else main.innerHTML = { devices, mix, runtime, accounts, settings }[ui.page]();
     if (ui.page === 'mix' && view.on) viewLoop();
+    if (ui.page === 'mix') roomLiveLoop();
   }
   renderDrawer();
   paintDownloads();
@@ -612,6 +781,7 @@ document.addEventListener('click', (e) => {
   else if (t.id === 'refresh') send('refresh');
   else if (t.id === 'pickdl') send('pickDownloadDir');
   else if (t.id === 'remapreset') send('setDash', { dash: { ...S.dash, remap: {} } });
+  else if (t.id === 'touchreset') send('setTouch', { touch: { pitch: 0, yaw: 0, roll: 0, x: 0, y: 0, z: 0 } });
   else if (t.id === 'viewtoggle') {
     view.on = !view.on;
     t.classList.toggle('on', view.on);
@@ -624,11 +794,12 @@ document.addEventListener('click', (e) => {
 document.addEventListener('dblclick', (e) => { const g = e.target.closest('.game'); if (g) send('launch', { id: g.dataset.game }); });
 document.addEventListener('input', (e) => {
   if (e.target.type === 'range' && e.target.dataset.kind === 'num') {
-    const group = e.target.dataset.dash !== undefined ? 'dash' : 'rift';
+    const group = groupOf(e.target);
     const key = e.target.dataset[group];
     const b = document.querySelector(`[data-shows="${group}.${key}"]`);
     const v = +e.target.value;
-    if (b) b.textContent = key === 'distance' ? `${v.toFixed(2)} m` : key === 'width' ? `${v.toFixed(1)} m` : `${Math.round(v * 100)}%`;
+    if (b) b.textContent = group === 'touch' ? (['pitch', 'yaw', 'roll'].includes(key) ? `${v.toFixed(0)}°` : `${v.toFixed(1)} cm`)
+      : key === 'distance' ? `${v.toFixed(2)} m` : key === 'width' ? `${v.toFixed(1)} m` : `${Math.round(v * 100)}%`;
   }
   if (e.target.id === 'q') { ui.search = e.target.value; render(); }
   if (e.target.id === 'viewgain') view.gain = Number(e.target.value);
@@ -638,7 +809,7 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'version') { const g = S.games.find((x) => x.id === ui.selected); if (g) { ui.version[g.app_id] = e.target.value; render(); } }
   if (e.target.id === 'closeaction') send('setCloseAction', { value: e.target.value });
   if (e.target.id === 'mirroreye') send('setMirrorEye', { value: e.target.value });
-  if (e.target.dataset && (e.target.dataset.dash !== undefined || e.target.dataset.rift !== undefined)) settingChanged(e.target);
+  if (groupOf(e.target)) settingChanged(e.target);
   if (e.target.dataset && e.target.dataset.remap !== undefined) {
     const remap = { ...((S.dash || {}).remap || {}) };
     const from = e.target.dataset.remap;
@@ -646,6 +817,7 @@ document.addEventListener('change', (e) => {
     send('setDash', { dash: { ...S.dash, remap } });
   }
   if (e.target.id === 'mixcontrollers') send('mixSet', { enabled: e.target.value === 'cv1' });
+  if (e.target.id === 'mixtracking') send('mixTracking', { tracking: e.target.value });
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.selected) { ui.selected = null; render(); }

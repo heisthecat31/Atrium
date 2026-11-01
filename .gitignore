@@ -26,3 +26,7 @@ Thumbs.db
 /native/atrium_dash/build/
 /native/atrium_dash/*.log
 /native/atrium_xr/build/
+/native/touchlink/build/
+
+# Release output (release.ps1)
+/dist/

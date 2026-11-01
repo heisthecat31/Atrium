@@ -13,6 +13,17 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 
 static STDIN: Mutex<Option<ChildStdin>> = Mutex::new(None);
+/// Settings > Dash: Atrium's dash (true), or SteamVR's / Meta's, with Atrium's closed.
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Atrium's dash on or off (the dash choice in Settings). Off closes it and keeps it closed; on
+/// starts it again within a few seconds.
+pub fn set_enabled(on: bool) {
+    if ENABLED.swap(on, std::sync::atomic::Ordering::SeqCst) != on && !on {
+        send(&serde_json::json!({ "type": "quit" }));
+        sys::log("dash: Atrium's dash closed (another dash chosen)");
+    }
+}
 
 pub fn available() -> bool {
     sys::native_tool("atrium-dash.exe").is_some()
@@ -22,10 +33,10 @@ pub fn available() -> bool {
 /// for a new build), it's started again a few seconds later.
 pub fn start(on_command: impl Fn(String) + Send + Sync + 'static) -> Result<(), String> {
     let on_command = std::sync::Arc::new(on_command);
-    let first = start_once(on_command.clone());
+    let first = if ENABLED.load(std::sync::atomic::Ordering::SeqCst) { start_once(on_command.clone()) } else { Ok(()) };
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        if STDIN.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if ENABLED.load(std::sync::atomic::Ordering::SeqCst) && STDIN.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
             let c = on_command.clone();
             match start_once(c) {
                 Ok(()) => sys::log("dash: started again"),
